@@ -227,14 +227,6 @@ impl Job {
         self.lock_resources.as_deref().unwrap_or(&[])
     }
 
-    /// Number of resources the job holds (only queued or running jobs hold them).
-    pub fn count_lock_resources(&self) -> usize {
-        match self.state {
-            JobState::Queued | JobState::Running => self.resources().len(),
-            _ => 0,
-        }
-    }
-
     /// Unix seconds of the most recent ENQUEUE or START event, for queued or running jobs.
     pub fn queued_or_running_timestamp(&self) -> i64 {
         match self.state {
