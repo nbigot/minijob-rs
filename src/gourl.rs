@@ -289,6 +289,11 @@ pub fn parse(raw: &str) -> Result<(), String> {
 
 // ------------------------------------------------------------------ net/netip
 
+/// Go `net.ParseIP(s) != nil`: an IPv4 or IPv6 address, without zone.
+pub fn is_ip(s: &str) -> bool {
+    !s.contains('%') && parse_addr(s.as_bytes()).is_ok()
+}
+
 enum Addr {
     V4,
     V6,

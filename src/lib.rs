@@ -10,6 +10,7 @@ pub mod consul;
 pub mod eventlog;
 pub mod events;
 pub mod gojson;
+pub mod gomail;
 pub mod goregex;
 pub mod gourl;
 pub mod log;

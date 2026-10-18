@@ -118,8 +118,9 @@ version that are fixed here; the few deliberate behavior changes are marked **(c
 - `pattern`, `patternProperties` and `format: regex` use Go's regular expression syntax and
   matching (`\d`, `\w`, `\s`, `\b` are ASCII-only). Script names with an underscore
   (`\p{Old_Italic}`) are accepted; Go 1.25 refuses them.
-- The detail text of `format` errors that quote Go library messages (`date-time`, `date`,
-  `time`, `email`, `idn-email`) is an approximation; the `uri` family gives Go's messages.
+- `format` checks accept the same strings as Go and give the same messages (they quote
+  Go's `time.Parse`, `mail.ParseAddress` and `url.Parse`). The `contains` message shows the
+  subschema as JSON; Go printed an internal structure with memory addresses.
 - The schema is compiled at startup and shared safely between requests (Go modified it on
   first use from concurrent requests).
 
