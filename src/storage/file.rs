@@ -123,7 +123,7 @@ impl<'de> Visitor<'de> for FileVisitor<'_> {
 
 /// Decodes the file content. Like Go's `json.Decoder`, data after the first value is ignored.
 pub fn decode(bytes: &[u8]) -> Result<Vec<Job>, String> {
-    let text = String::from_utf8_lossy(bytes);
+    let text = crate::gojson::decode::go_text(bytes);
     let mut jobs = Vec::new();
     let mut de = serde_json::Deserializer::from_str(&text);
     (&mut de)

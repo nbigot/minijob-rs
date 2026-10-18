@@ -21,14 +21,72 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-/// Invalid UTF-8 is replaced by U+FFFD, as Go's decoder does, instead of being rejected.
-fn lossy(bytes: &[u8]) -> Cow<'_, str> {
-    String::from_utf8_lossy(bytes)
+/// The text of a JSON document as Go's decoder reads it: invalid UTF-8 and `\u` escapes of
+/// unpaired UTF-16 surrogates become U+FFFD instead of being rejected (serde_json refuses
+/// lone surrogates).
+pub fn go_text(bytes: &[u8]) -> Cow<'_, str> {
+    match String::from_utf8_lossy(bytes) {
+        Cow::Borrowed(s) => replace_lone_surrogates(s).map_or(Cow::Borrowed(s), Cow::Owned),
+        Cow::Owned(s) => Cow::Owned(replace_lone_surrogates(&s).unwrap_or(s)),
+    }
+}
+
+fn hex4(b: &[u8]) -> Option<u16> {
+    let s = std::str::from_utf8(b.get(..4)?).ok()?;
+    u16::from_str_radix(s, 16).ok()
+}
+
+/// Rewrites `\uXXXX` escapes of unpaired surrogates as `�` (Go `unquote`: a high
+/// surrogate followed by a `\u` low surrogate is a pair, any other surrogate is U+FFFD).
+/// Returns `None` when there is nothing to change.
+fn replace_lone_surrogates(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let is_high = |u: u16| (0xD800..0xDC00).contains(&u);
+    let is_low = |u: u16| (0xDC00..0xE000).contains(&u);
+    let mut out: Option<String> = None;
+    let mut copied = 0;
+    let mut in_string = false;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => in_string = !in_string,
+            b'\\' if in_string => {
+                if b.get(i + 1) == Some(&b'u')
+                    && let Some(u) = hex4(&b[i + 2..])
+                    && (is_high(u) || is_low(u))
+                {
+                    let paired = is_high(u)
+                        && b.get(i + 6) == Some(&b'\\')
+                        && b.get(i + 7) == Some(&b'u')
+                        && hex4(&b[(i + 8).min(b.len())..]).is_some_and(is_low);
+                    if paired {
+                        i += 12;
+                    } else {
+                        let o = out.get_or_insert_with(|| String::with_capacity(text.len()));
+                        o.push_str(&text[copied..i]);
+                        o.push_str("\\ufffd");
+                        i += 6;
+                        copied = i;
+                    }
+                    continue;
+                }
+                // Any other escape: skip the escaped character (it may be a quote).
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.map(|mut o| {
+        o.push_str(&text[copied..]);
+        o
+    })
 }
 
 /// Decodes a document like `json.Unmarshal(data, &v)` with `v interface{}`.
 pub fn parse_value(bytes: &[u8]) -> Result<Value, DecodeError> {
-    serde_json::from_str(&lossy(bytes)).map_err(|e| DecodeError(e.to_string()))
+    serde_json::from_str(&go_text(bytes)).map_err(|e| DecodeError(e.to_string()))
 }
 
 /// A top-level document decoded for a Go struct target.
@@ -99,7 +157,7 @@ impl<'de> Visitor<'de> for TopVisitor {
 
 /// Decodes a document that Go decodes into a struct of type `go_type`.
 pub fn parse_top(bytes: &[u8], go_type: &str) -> Result<Top, DecodeError> {
-    let text = lossy(bytes);
+    let text = go_text(bytes);
     let mut de = serde_json::Deserializer::from_str(&text);
     let parsed = (&mut de)
         .deserialize_any(TopVisitor)
@@ -319,6 +377,39 @@ mod tests {
         assert!(set_uint(&json!(-1), &mut u).is_err());
         set_uint(&json!(u64::MAX), &mut u).unwrap();
         assert_eq!(u, u64::MAX);
+    }
+
+    #[test]
+    fn lone_surrogates_become_replacement_characters() {
+        let s = |text: &str| match parse_value(text.as_bytes()).unwrap() {
+            Value::String(s) => s,
+            v => panic!("{v}"),
+        };
+        assert_eq!(s(r#""\ud800""#), "\u{FFFD}");
+        assert_eq!(s(r#""a\udc00b""#), "a\u{FFFD}b");
+        // `\u` escapes built at run time: "\\u{x}" is a backslash, `u` and the hex digits.
+        let esc = |hex: &[&str]| hex.iter().map(|x| format!("\\u{x}")).collect::<String>();
+        let pair = esc(&["d83d", "de00"]);
+        assert_eq!(s(&format!("\"{pair}\"")), "\u{1F600}", "a pair is kept");
+        let not_low = esc(&["d83d", "0041"]);
+        assert_eq!(s(&format!("\"{not_low}\"")), "\u{FFFD}A");
+        let high_then_pair = esc(&["d83d", "d83d", "de00"]);
+        assert_eq!(s(&format!("\"{high_then_pair}\"")), "\u{FFFD}\u{1F600}");
+        let valid = format!(r#"{{"a":"{}{pair}"}}"#, esc(&["00e9"]));
+        assert!(replace_lone_surrogates(&valid).is_none());
+        assert_eq!(s(r#""\ud83d""#), "\u{FFFD}", "at the end of the string");
+        assert_eq!(
+            s(r#""\\ud800""#),
+            "\\ud800",
+            "an escaped backslash is not an escape"
+        );
+        assert_eq!(s(r#""\"\ud800""#), "\"\u{FFFD}");
+        // In keys and nested values too.
+        let v = parse_value(br#"{"\udfff":["\ud800"]}"#).unwrap();
+        assert_eq!(v, json!({"\u{FFFD}": ["\u{FFFD}"]}));
+        // Outside strings, nothing is rewritten (the document stays invalid).
+        assert!(parse_value(br#"\ud800"#).is_err());
+        assert!(parse_top(br#"{"topic":"\udc00x"}"#, "job.JobRequest").is_ok());
     }
 
     #[test]
