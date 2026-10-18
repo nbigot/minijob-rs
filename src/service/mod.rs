@@ -916,9 +916,9 @@ impl Service {
             return Ok(true);
         }
         let delay = policy.backoff_strategy.delay_ms(failures);
-        if delay == 0 {
-            // RetryJob: the job still owns its resources.
-            self.retry_job(st, id, now_ms(), fx);
+        // RetryJob: the job normally still owns its resources. If one was unlocked by the
+        // admin API and taken by another job, the job waits in the retry queue instead.
+        if delay == 0 && self.retry_job(st, id, now_ms(), fx) {
             return Ok(false);
         }
         // RetryJobLater
@@ -1433,6 +1433,40 @@ logger: {level: error, encoding: json}
         svc.succeed(id).await.unwrap();
         assert!(svc.locked_resources().is_empty());
         assert_eq!(locked_count(&svc, "r"), 0);
+    }
+
+    /// Retry without delay while the job's resource has been unlocked and taken by another
+    /// job: the failed job waits in the retry queue instead of staying "running".
+    #[tokio::test]
+    async fn immediate_retry_waits_for_a_taken_resource() {
+        let text = CONFIG
+            .replace(
+                "retryPolicy: {maxRetry: 1}",
+                "retryPolicy: {maxRetry: 5, backoffStrategy: {type: 0, base: 0}}",
+            )
+            .replace("RETAIN", "-1")
+            .replace("AGE", "-1");
+        let cfg = Arc::new(crate::config::parse(&text).unwrap());
+        let svc = Service::create(cfg, "test", Logger::nop()).await.unwrap();
+        let body = br#"{"topic":"t","lockResources":["r"]}"#;
+        let a = svc.create_job(body).await.unwrap().id;
+        let pull = |id| PullRequest {
+            job_uuid: Some(id),
+            num_jobs: 1,
+            visibility_timeout: 60,
+            ..Default::default()
+        };
+        svc.pull_jobs(&pull(a)).await.unwrap();
+        svc.unlock_resource("r").await.unwrap();
+        let b = svc.create_job(body).await.unwrap().id;
+        assert_eq!(svc.get_job(b).unwrap().state(), JobState::Queued);
+        assert!(!svc.fail(a).await.unwrap());
+        assert_eq!(svc.get_job(a).unwrap().state(), JobState::Hidden);
+        svc.pull_jobs(&pull(b)).await.unwrap();
+        svc.succeed(b).await.unwrap();
+        svc.tick().await;
+        assert_eq!(svc.get_job(a).unwrap().state(), JobState::Queued);
+        assert_eq!(svc.locked_resources().get("r"), Some(&a));
     }
 
     #[tokio::test]
