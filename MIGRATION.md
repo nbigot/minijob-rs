@@ -43,6 +43,15 @@ version that are fixed here; the few deliberate behavior changes are marked **(c
 - Request headers: up to 8 KiB are accepted; larger ones get `431` with an empty body. Go
   refused anything above 4 KiB with `431 Request Header Fields Too Large`, and the client
   often saw a connection reset instead of that answer.
+- At most 100 header fields per request; more get `431` with an empty body (Go only limited
+  the size).
+- The request target must be a valid URI: `"`, `<` and `>` in the query, `<`, `>` and `` ` ``
+  in the path, and bytes that are not UTF-8 must be percent-encoded. Such requests, and
+  other malformed ones (invalid request line, header without colon, invalid
+  `Content-Length`...), get `400` with an empty body; Go accepted these targets and
+  described the other errors in a text body.
+- An HTTP/1.0 request is answered with an HTTP/1.0 status line (Go: HTTP/1.1 and
+  `Connection: close`).
 - A client that does not send its headers within 10 s is disconnected (same timeout as Go).
 - Bodies above 10 MiB get `413 Request Entity Too Large`, as in Go.
 - Request bodies compressed with `gzip`, `deflate` or `br` (`Content-Encoding`) are decoded, as in Go.
