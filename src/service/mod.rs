@@ -1799,6 +1799,25 @@ webserver:
             };
             check(&svc, unlocked, step, op);
         }
+        // Stored and loaded again (the jobs as a backend writes them): same jobs, and the
+        // restored indexes, locks and metrics agree with them.
+        let jobs: Vec<Job> = svc
+            .all_jobs()
+            .iter()
+            .map(|j| Job::decode(&j.to_json()).unwrap())
+            .collect();
+        let before: Vec<(Uuid, JobState)> = jobs.iter().map(|j| (j.id, j.state())).collect();
+        let restored = service().await;
+        restored.restore(jobs);
+        let after: Vec<(Uuid, JobState)> = restored
+            .all_jobs()
+            .iter()
+            .map(|j| (j.id, j.state()))
+            .collect();
+        assert_eq!(before, after, "seed {seed}: restored states");
+        check(&restored, unlocked, steps, "restore");
+        restored.tick().await;
+        check(&restored, unlocked, steps + 1, "tick after restore");
     }
 
     #[tokio::test]
