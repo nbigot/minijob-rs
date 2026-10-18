@@ -87,6 +87,12 @@
       "title": "Delay in seconds before starting the job",
 			"default": 0,
       "examples": [1, 60]
+    },
+    "callbackUrl": {
+      "$id": "#/properties/callbackUrl",
+      "type": "string",
+      "title": "URL called when the job completes (optional)",
+      "examples": ["https://api.example.com/webhook"]
     }
   }
 }

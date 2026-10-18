@@ -27,9 +27,9 @@ fn schema_validation_like_go() {
             ])),
         ),
         (
-            r#"{"properties":{},"callbackUrl":"x"}"#,
+            r#"{"properties":{},"bogus":"x"}"#,
             invalid(
-                json!([{"failedField":"/","tag":"additional properties are not allowed","value":"map[callbackUrl:x properties:map[]]"}]),
+                json!([{"failedField":"/","tag":"additional properties are not allowed","value":"map[bogus:x properties:map[]]"}]),
             ),
         ),
         (
@@ -101,6 +101,12 @@ fn schema_validation_like_go() {
     }
     let r = s.post_json("/api/v1/job/", r#"{"properties":{"k":"v"},"topic":"ok"}"#);
     assert_eq!(r.status, 200);
+    // Refused by the Go template, which did not list callbackUrl.
+    let r = s.post_json(
+        "/api/v1/job/",
+        r#"{"properties":{},"callbackUrl":"https://example.com/cb"}"#,
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
 }
 
 #[test]
