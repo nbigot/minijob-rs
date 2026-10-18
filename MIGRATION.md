@@ -233,7 +233,9 @@ Redis:
   subdomains included (`"https://a.com, https://*.b.com"`); Go never matched the wildcard in
   that case.
 - Consul: same registration, agent configured by the `CONSUL_HTTP_*` environment variables;
-  `unix://` agent addresses are not supported.
+  `unix://` agent addresses are not supported. The service is deregistered with
+  `consul.server.token`, like the registration (Go used only `CONSUL_HTTP_TOKEN`, so with
+  ACLs and the token in the configuration the stopped service stayed registered).
 
 ## How compatibility was checked
 
