@@ -58,6 +58,15 @@ fn env(name: &str) -> String {
 
 impl Consul {
     pub fn new(cfg: &ConsulConfig, logger: Logger) -> Result<Consul, String> {
+        Self::with_env(cfg, logger, env)
+    }
+
+    /// `new` with the environment read through `env`.
+    fn with_env(
+        cfg: &ConsulConfig,
+        logger: Logger,
+        env: impl Fn(&str) -> String,
+    ) -> Result<Consul, String> {
         crate::tls::install_provider();
         let mut addr = env("CONSUL_HTTP_ADDR");
         if addr.is_empty() {
@@ -182,10 +191,11 @@ impl Consul {
         }
     }
 
-    /// `DeRegisterConsul`.
+    /// `DeRegisterConsul`, with the token used for the registration (without it, an agent with
+    /// ACLs refuses the call and the stopped service stays registered).
     pub async fn deregister(&self) {
         let path = format!("/v1/agent/service/deregister/{}", self.cfg.service.id);
-        match Self::send(self.request(&path, "")).await {
+        match Self::send(self.request(&path, &self.cfg.server.token)).await {
             Ok(()) => self.logger.info(
                 "Consul service deregistered",
                 &[
@@ -202,5 +212,66 @@ impl Consul {
                 ],
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A Consul agent that answers 200 and records `(request line, X-Consul-Token)`.
+    async fn agent() -> (String, tokio::sync::mpsc::UnboundedReceiver<(String, String)>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match tcp.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let line = head.lines().next().unwrap_or("").to_string();
+                let token = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("x-consul-token: "))
+                    .unwrap_or("")
+                    .to_string();
+                let _ = tx.send((line, token));
+                let _ = tcp
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn configured_token_is_used_to_register_and_deregister() {
+        let (addr, mut rx) = agent().await;
+        let mut cfg = ConsulConfig::default();
+        cfg.server.token = "secret".into();
+        cfg.service.id = "minijob".into();
+        let env = |name: &str| match name {
+            "CONSUL_HTTP_ADDR" => addr.clone(),
+            _ => String::new(),
+        };
+        let consul = Consul::with_env(&cfg, Logger::nop(), env).unwrap();
+        consul.register().await.unwrap();
+        consul.deregister().await;
+        let (line, token) = rx.recv().await.unwrap();
+        assert!(line.starts_with("PUT /v1/agent/service/register "), "{line}");
+        assert_eq!(token, "secret");
+        let (line, token) = rx.recv().await.unwrap();
+        assert!(
+            line.starts_with("PUT /v1/agent/service/deregister/minijob "),
+            "{line}"
+        );
+        assert_eq!(token, "secret");
     }
 }
