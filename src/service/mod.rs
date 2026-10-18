@@ -1483,3 +1483,380 @@ logger: {level: error, encoding: json}
         assert_eq!(svc.get_job(job.id).unwrap().state(), JobState::Queued);
     }
 }
+
+/// Random sequences of operations: after each one, the scheduler indexes, the resource locks
+/// and the metrics must agree with the states of the jobs.
+#[cfg(test)]
+mod random_tests {
+    use super::*;
+    use crate::model::JobState::*;
+
+    const CONFIG: &str = "
+backend:
+  type: mock
+  logger: {level: error, encoding: json}
+jobs:
+  defaultVisibilityTimeout: 60
+  maxVisibilityTimeout: 600
+  retryPolicy: {maxRetry: 2, backoffStrategy: {type: 0, base: 1}}
+  retentionPolicy: {enable: true, interval: 60, maxJobs: 5, maxJobAge: -1}
+logger: {level: error, encoding: json}
+webserver:
+  metrics: {enable: true}
+";
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+            &items[self.below(items.len() as u64) as usize]
+        }
+    }
+
+    async fn service() -> Arc<Service> {
+        let cfg = Arc::new(crate::config::parse(CONFIG).unwrap());
+        Service::create(cfg, "test", Logger::nop()).await.unwrap()
+    }
+
+    fn job_body(rng: &mut Rng) -> String {
+        let topic = rng.pick(&["a", "b", ""]);
+        let priority = rng.below(3) as i64 - 1;
+        let locks = rng.pick(&[
+            "null",
+            "[\"r1\"]",
+            "[\"r1\", \"r2\"]",
+            "[\"r2\", \"r2\"]",
+            "[\"r3\"]",
+            "[]",
+        ]);
+        let start = match rng.below(4) {
+            0 => now_ms() + 1 + rng.below(4) as i64,
+            1 => now_ms() - 1000,
+            _ => 0,
+        };
+        format!(
+            r#"{{"topic":"{topic}","priority":{priority},"lockResources":{locks},"startAfter":{start}}}"#
+        )
+    }
+
+    /// `unlocked`: an admin unlock happened, so a queued or running job may have lost locks.
+    fn check(svc: &Service, unlocked: bool, step: usize, op: &str) {
+        let st = svc.state.read();
+        let ctx = || format!("step {step} after {op}");
+        let with = |s: JobState| -> Vec<&Arc<Job>> {
+            st.jobs.values().filter(|j| j.state() == s).collect()
+        };
+        let keys = |s: JobState| -> BTreeSet<OrderKey> {
+            with(s).into_iter().map(|j| OrderKey::of(j)).collect()
+        };
+        assert_eq!(st.queued, keys(Queued), "queued index, {}", ctx());
+        let mut by_topic: HashMap<String, BTreeSet<OrderKey>> = HashMap::new();
+        for j in with(Queued) {
+            by_topic
+                .entry(j.topic.clone())
+                .or_default()
+                .insert(OrderKey::of(j));
+        }
+        assert_eq!(st.queued_by_topic, by_topic, "queued by topic, {}", ctx());
+        let ids = |s: JobState| -> HashSet<Uuid> { with(s).into_iter().map(|j| j.id).collect() };
+        assert_eq!(st.running, ids(Running), "running, {}", ctx());
+        assert_eq!(st.pending, keys(Pending), "pending, {}", ctx());
+        assert_eq!(
+            st.retry.ids().collect::<HashSet<_>>(),
+            ids(Hidden),
+            "retry queue, {}",
+            ctx()
+        );
+        assert_eq!(
+            st.delayed.ids().collect::<HashSet<_>>(),
+            ids(Delayed),
+            "delayed queue, {}",
+            ctx()
+        );
+        assert!(with(Created).is_empty(), "created jobs, {}", ctx());
+        assert!(with(Canceled).is_empty(), "canceled jobs, {}", ctx());
+        let mut locked: HashMap<String, u64> = HashMap::new();
+        for (r, owner) in &st.locks {
+            let j = st
+                .jobs
+                .get(owner)
+                .unwrap_or_else(|| panic!("lock {r} of a deleted job, {}", ctx()));
+            assert!(
+                matches!(j.state(), Queued | Running),
+                "lock {r} held by a {:?} job, {}",
+                j.state(),
+                ctx()
+            );
+            assert!(
+                j.resources().contains(r),
+                "lock {r} not requested, {}",
+                ctx()
+            );
+            *locked.entry(j.topic.clone()).or_default() += 1;
+        }
+        if !unlocked {
+            for j in with(Queued).into_iter().chain(with(Running)) {
+                for r in j.resources() {
+                    assert_eq!(
+                        st.locks.get(r),
+                        Some(&j.id),
+                        "{r} not locked by its job, {}",
+                        ctx()
+                    );
+                }
+            }
+        }
+        let metrics = svc.metrics.job_metrics_by_topic();
+        let stats = svc.metrics.topics_stats();
+        for (topic, list) in &metrics {
+            let m = &list[0];
+            let count = |s: JobState| {
+                st.jobs
+                    .values()
+                    .filter(|j| j.topic == *topic && j.state() == s)
+                    .count() as u64
+            };
+            let existing = st.jobs.values().filter(|j| j.topic == *topic).count() as u64;
+            assert_eq!(m.jobs_existing, existing, "{topic:?} existing, {}", ctx());
+            assert_eq!(
+                m.jobs_status_delayed,
+                count(Delayed),
+                "{topic:?} delayed, {}",
+                ctx()
+            );
+            assert_eq!(
+                m.jobs_status_pending,
+                count(Pending),
+                "{topic:?} pending, {}",
+                ctx()
+            );
+            assert_eq!(
+                m.jobs_status_queued,
+                count(Queued),
+                "{topic:?} queued, {}",
+                ctx()
+            );
+            assert_eq!(
+                m.jobs_status_running,
+                count(Running),
+                "{topic:?} running, {}",
+                ctx()
+            );
+            assert_eq!(
+                m.jobs_status_succeeded,
+                count(Succeeded),
+                "{topic:?} succeeded, {}",
+                ctx()
+            );
+            assert_eq!(
+                m.jobs_status_failed,
+                count(Failed),
+                "{topic:?} failed, {}",
+                ctx()
+            );
+            assert_eq!(
+                m.jobs_status_hidden,
+                count(Hidden),
+                "{topic:?} hidden, {}",
+                ctx()
+            );
+            assert_eq!(
+                m.resources_locked_count,
+                locked.get(topic).copied().unwrap_or(0),
+                "{topic:?} locked resources, {}",
+                ctx()
+            );
+            let s = stats.iter().find(|s| s.topic_name == *topic).unwrap();
+            assert_eq!(s.total_jobs, existing, "{topic:?} totalJobs, {}", ctx());
+            assert_eq!(
+                s.active_jobs,
+                count(Pending) + count(Queued) + count(Running),
+                "{topic:?} activeJobs, {}",
+                ctx()
+            );
+        }
+    }
+
+    /// Pending jobs that are due and whose resources are free must have been queued.
+    fn check_scheduled(svc: &Service, due_before: i64, step: usize) {
+        let st = svc.state.read();
+        for k in &st.pending {
+            let j = &st.jobs[&k.id];
+            if j.start_after <= due_before {
+                assert!(
+                    j.resources()
+                        .iter()
+                        .any(|r| st.locks.get(r).is_some_and(|o| *o != j.id)),
+                    "step {step}: pending job {} could be queued",
+                    j.id
+                );
+            }
+        }
+    }
+
+    async fn run(seed: u64, steps: usize) {
+        let svc = service().await;
+        let mut rng = Rng(seed);
+        let mut unlocked = false;
+        for step in 0..steps {
+            let ids: Vec<Uuid> = svc.state.read().jobs.keys().copied().collect();
+            let any_id = |rng: &mut Rng| {
+                if ids.is_empty() || rng.below(10) == 0 {
+                    Uuid::now_v7()
+                } else {
+                    *rng.pick(&ids)
+                }
+            };
+            let op = match rng.below(100) {
+                0..=27 => {
+                    let _ = svc.create_job(job_body(&mut rng).as_bytes()).await;
+                    "create"
+                }
+                28..=45 => {
+                    let req = PullRequest {
+                        job_uuid: (rng.below(4) == 0).then(|| any_id(&mut rng)),
+                        topic: rng.pick(&["a", "b", "", "*"]).to_string(),
+                        num_jobs: 1 + rng.below(3),
+                        visibility_timeout: *rng.pick(&[0, 60]),
+                        wait_time_seconds: 0,
+                    };
+                    let _ = svc.pull_jobs(&req).await;
+                    "pull"
+                }
+                46..=55 => {
+                    let _ = svc.succeed(any_id(&mut rng)).await;
+                    "succeed"
+                }
+                56..=65 => {
+                    let _ = svc.fail(any_id(&mut rng)).await;
+                    "fail"
+                }
+                66..=71 => {
+                    let _ = svc.cancel(any_id(&mut rng)).await;
+                    "cancel"
+                }
+                72..=75 => {
+                    let _ = svc.delete_job(any_id(&mut rng)).await;
+                    "delete"
+                }
+                76..=78 => {
+                    let _ = svc.clone_job(any_id(&mut rng)).await;
+                    "clone"
+                }
+                79..=80 => {
+                    let _ = svc.change_visibility(any_id(&mut rng), rng.below(3)).await;
+                    "visibility"
+                }
+                81..=89 => {
+                    if rng.below(2) == 0 {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                    let due = now_ms();
+                    svc.tick().await;
+                    check_scheduled(&svc, due, step);
+                    "tick"
+                }
+                90..=91 => {
+                    let _ = svc
+                        .unlock_resource(rng.pick(&["r1", "r2", "r3", "x"]))
+                        .await;
+                    unlocked = true;
+                    "unlock"
+                }
+                92 => {
+                    svc.unlock_all_resources().await;
+                    unlocked = true;
+                    "unlock all"
+                }
+                93..=94 => {
+                    svc.apply_retention().await;
+                    "retention"
+                }
+                95..=96 => {
+                    let _ = svc.delete_queued().await;
+                    "delete queued"
+                }
+                97 if rng.below(4) == 0 => {
+                    let _ = svc.delete_all().await;
+                    unlocked = false;
+                    "delete all"
+                }
+                _ => {
+                    let due = now_ms();
+                    svc.tick().await;
+                    check_scheduled(&svc, due, step);
+                    "tick"
+                }
+            };
+            check(&svc, unlocked, step, op);
+        }
+    }
+
+    #[tokio::test]
+    async fn random_operations_keep_the_state_consistent() {
+        for seed in 1..=20 {
+            run(seed * 7919, 600).await;
+        }
+    }
+
+    /// The same operations from concurrent tasks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_operations_keep_the_state_consistent() {
+        let svc = service().await;
+        let mut tasks = Vec::new();
+        for t in 0..8u64 {
+            let svc = svc.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut rng = Rng(1000 + t);
+                for _ in 0..400 {
+                    let ids: Vec<Uuid> = svc.state.read().jobs.keys().copied().collect();
+                    let id = if ids.is_empty() {
+                        Uuid::now_v7()
+                    } else {
+                        *rng.pick(&ids)
+                    };
+                    match rng.below(8) {
+                        0 | 1 => {
+                            let _ = svc.create_job(job_body(&mut rng).as_bytes()).await;
+                        }
+                        2 => {
+                            let req = PullRequest {
+                                topic: "*".into(),
+                                num_jobs: 2,
+                                visibility_timeout: 60,
+                                ..Default::default()
+                            };
+                            let _ = svc.pull_jobs(&req).await;
+                        }
+                        3 => {
+                            let _ = svc.succeed(id).await;
+                        }
+                        4 => {
+                            let _ = svc.fail(id).await;
+                        }
+                        5 => {
+                            let _ = svc.cancel(id).await;
+                        }
+                        6 => {
+                            let _ = svc.delete_job(id).await;
+                        }
+                        _ => svc.tick().await,
+                    }
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        check(&svc, false, 0, "concurrent operations");
+    }
+}
