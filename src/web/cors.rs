@@ -19,30 +19,34 @@ pub struct Cors {
     allow_headers: String,
 }
 
-/// `normalizeOrigin`: `scheme://host[:port]` lowercase, no path, query or fragment.
+/// Go `strings.ToLower` (`unicode.ToLower` on each character).
+fn go_lower(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            // The only character whose full lowercase mapping is not a single character.
+            '\u{130}' => 'i',
+            c => c.to_lowercase().next().unwrap_or(c),
+        })
+        .collect()
+}
+
+/// `normalizeOrigin`: Go's `url.Parse`, then `scheme://host` in lowercase (host decoded, port
+/// kept, user info dropped); refuses no host, a `*` in the host, a path other than `/`, a
+/// query or a fragment.
 fn normalize_origin(origin: &str) -> Option<String> {
-    let (scheme, rest) = origin.split_once("://")?;
-    if scheme.is_empty()
-        || !scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    let u = crate::gourl::parse(origin).ok()?;
+    if u.host.is_empty()
+        || u.host.contains(&b'*')
+        || !(u.path.is_empty() || u.path == b"/")
+        || !u.raw_query.is_empty()
+        || !u.fragment.is_empty()
     {
-        return None;
-    }
-    let (host, path) = match rest.find(['/', '?', '#']) {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, ""),
-    };
-    if host.is_empty() || host.contains('*') || host.contains('@') {
-        return None;
-    }
-    if !(path.is_empty() || path == "/") {
         return None;
     }
     Some(format!(
         "{}://{}",
-        scheme.to_lowercase(),
-        host.to_lowercase()
+        u.scheme,
+        go_lower(&String::from_utf8_lossy(&u.host))
     ))
 }
 
@@ -110,11 +114,15 @@ impl Cors {
         method: &Method,
         headers: &HeaderMap,
     ) -> Result<Vec<(header::HeaderName, String)>, Box<Resp>> {
+        // Fiber reads the header bytes as they are (`to_str` refuses non-ASCII values).
         let origin = headers
             .get(header::ORIGIN)
+            .map(|v| go_lower(&String::from_utf8_lossy(v.as_bytes())))
+            .unwrap_or_default();
+        let request_headers = headers
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_lowercase();
+            .unwrap_or("");
         let mut out: Vec<(header::HeaderName, String)> = Vec::new();
         let vary = |out: &mut Vec<(header::HeaderName, String)>, v: &str| {
             out.push((header::VARY, v.to_string()));
@@ -141,6 +149,13 @@ impl Cors {
             if let Some(a) = allow {
                 out.push((header::ACCESS_CONTROL_ALLOW_ORIGIN, a));
             }
+            // `setCORSHeaders` without configured headers: the request's are reflected.
+            if !request_headers.is_empty() {
+                out.push((
+                    header::ACCESS_CONTROL_ALLOW_HEADERS,
+                    request_headers.to_string(),
+                ));
+            }
             return Ok(out);
         }
         // Preflight.
@@ -161,11 +176,7 @@ impl Cors {
             HeaderValue::from_static(ALLOW_METHODS),
         );
         let allow_headers = if self.allow_headers.is_empty() {
-            headers
-                .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string()
+            request_headers.to_string()
         } else {
             self.allow_headers.clone()
         };
@@ -225,6 +236,70 @@ mod tests {
             "[CORS] Invalid origin format in configuration: a.com"
         );
         assert!(Cors::new("https://a.com/path", "").is_err());
+    }
+
+    /// Origins are parsed with Go's `url.Parse` rules, as Fiber does.
+    #[test]
+    fn origins_normalized_like_fiber() {
+        let n = |o: &str| normalize_origin(o);
+        assert_eq!(
+            n("HTTPS://A.Com:8080/").as_deref(),
+            Some("https://a.com:8080")
+        );
+        assert_eq!(n("https://user@a.com").as_deref(), Some("https://a.com"));
+        assert_eq!(n("https://a.com?").as_deref(), Some("https://a.com"));
+        assert_eq!(n("https://a.com#").as_deref(), Some("https://a.com"));
+        assert_eq!(n("https://%C3%A9.com").as_deref(), Some("https://é.com"));
+        assert_eq!(n("https://[::1]:80").as_deref(), Some("https://[::1]:80"));
+        assert_eq!(n("https://\u{130}.com").as_deref(), Some("https://i.com"));
+        for bad in [
+            // Hosts may only percent-encode non-ASCII bytes.
+            "https://ex%41mple.com",
+            "https://a.com:abc",
+            "1http://a.com",
+            "https://a.com/p",
+            "https://a.com?q",
+            "https://a.com#f",
+            "https://",
+            "mailto:a@b.c",
+            "a.com",
+            "https://a b.com",
+        ] {
+            assert_eq!(n(bad), None, "{bad}");
+        }
+    }
+
+    /// A simple request reflects `Access-Control-Request-Headers` (Fiber's `setCORSHeaders`
+    /// without configured headers); a non-ASCII `Origin` is still an origin.
+    #[test]
+    fn simple_request_headers_like_fiber() {
+        let c = Cors::new("*", "x-configured").unwrap();
+        let h = c
+            .handle(
+                &Method::POST,
+                &hm(&[
+                    ("origin", "http://x.com"),
+                    ("access-control-request-headers", "x-a"),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            h,
+            vec![
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
+                (header::ACCESS_CONTROL_ALLOW_HEADERS, "x-a".to_string())
+            ]
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_bytes("http://é.com".as_bytes()).unwrap(),
+        );
+        let h = c.handle(&Method::GET, &headers).unwrap();
+        assert_eq!(
+            h,
+            vec![(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string())]
+        );
     }
 
     #[test]
