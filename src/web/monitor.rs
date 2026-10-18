@@ -35,9 +35,18 @@ pub struct Monitor {
 }
 
 impl Default for Monitor {
+    /// Takes a first CPU sample: usage is measured between two refreshes, so without it the
+    /// first request reported a meaningless value (100% on Windows).
     fn default() -> Self {
+        let mut sys = System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(std::process::id())]),
+            true,
+            ProcessRefreshKind::nothing().with_cpu(),
+        );
         Monitor {
-            sys: Mutex::new(System::new()),
+            sys: Mutex::new(sys),
         }
     }
 }
