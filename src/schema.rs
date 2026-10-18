@@ -116,7 +116,8 @@ enum Kw {
     ExclusiveMinimum(f64),
     MaxLength(i64),
     MinLength(i64),
-    Pattern(Regex),
+    /// The compiled pattern and its source (shown in messages).
+    Pattern(Regex, String),
     AllOf(Vec<NodeId>),
     AnyOf(Vec<NodeId>),
     OneOf(Vec<NodeId>),
@@ -326,10 +327,6 @@ impl Compiler<'_> {
         l.into_iter().map(|v| self.compile(prop, v)).collect()
     }
 
-    fn regex(prop: &str, pattern: &str) -> Result<Regex, String> {
-        Regex::new(pattern).map_err(|e| json_err(prop, format!("invalid pattern: {pattern}: {e}")))
-    }
-
     fn keyword(&mut self, name: &str, raw: &RawValue) -> Result<Option<Kw>, String> {
         let p = name;
         Ok(Some(match name {
@@ -391,7 +388,8 @@ impl Compiler<'_> {
             "minLength" => Kw::MinLength(go_int(p, raw, "MinLength")?),
             "pattern" => {
                 let s: String = parse_raw(p, raw)?;
-                Kw::Pattern(Self::regex(p, &s)?)
+                let re = crate::goregex::compile(&s).map_err(|e| json_err(p, e))?;
+                Kw::Pattern(re, s)
             }
             "allOf" => Kw::AllOf(self.schema_list(p, raw)?),
             "anyOf" => Kw::AnyOf(self.schema_list(p, raw)?),
@@ -402,7 +400,9 @@ impl Compiler<'_> {
                 let m = self.schema_map(p, raw)?;
                 let mut list = Vec::new();
                 for (k, v) in m {
-                    list.push((Self::regex(p, &k)?, v));
+                    let re = crate::goregex::compile(&k)
+                        .map_err(|e| json_err(p, format!("invalid pattern: {k}: {e}")))?;
+                    list.push((re, v));
                 }
                 Kw::PatternProperties(list)
             }
@@ -631,13 +631,13 @@ impl Schema {
                     st.add_error(data, format!("min length of {m} characters required: {s}"));
                 }
             }
-            Kw::Pattern(re) => {
+            Kw::Pattern(re, source) => {
                 if let Some(s) = data.as_str()
                     && !re.is_match(s)
                 {
                     st.add_error(
                         data,
-                        format!("regexp pattern {} mismatch on string: {s}", re.as_str()),
+                        format!("regexp pattern {source} mismatch on string: {s}"),
                     );
                 }
             }
@@ -1443,7 +1443,7 @@ fn check_format(format: &str, s: &str) -> Result<(), String> {
                 check_json_pointer(rest)
             }
         }
-        "regex" => Regex::new(s)
+        "regex" => crate::goregex::compile(s)
             .map(|_| ())
             .map_err(|_| "invalid regex expression".to_string()),
         _ => Ok(()),
@@ -1647,6 +1647,41 @@ mod tests {
             s.validate(&json!("2026-02-30T12:00:00Z"))[0]
                 .message
                 .starts_with("invalid date-time: date-time incorrectly Formatted")
+        );
+    }
+
+    /// Patterns follow Go's regexp syntax and its ASCII-only `\d`, `\w`, `\s`, `\b`.
+    #[test]
+    fn go_regexp_patterns() {
+        let s = Schema::compile(
+            br#"{"pattern": "^\\d+$", "patternProperties": {"^x{": {"format": "regex"}}}"#,
+        )
+        .unwrap();
+        assert!(s.validate(&json!("123")).is_empty());
+        assert_eq!(
+            msgs(&s.validate(&json!("١٢٣"))),
+            vec![(
+                "/".into(),
+                "regexp pattern ^\\d+$ mismatch on string: ١٢٣".into(),
+                "١٢٣".into()
+            )]
+        );
+        assert!(s.validate(&json!({"x{": "a{"})).is_empty());
+        assert_eq!(
+            msgs(&s.validate(&json!({"x{": "a**"}))),
+            vec![(
+                "/x{".into(),
+                "invalid regex: invalid regex expression".into(),
+                "a**".into()
+            )]
+        );
+        assert_eq!(
+            Schema::compile(br#"{"pattern": "\\e"}"#).unwrap_err(),
+            "error unmarshaling pattern from json: error parsing regexp: invalid escape sequence: `\\e`"
+        );
+        assert_eq!(
+            Schema::compile(br#"{"patternProperties": {"(": {}}}"#).unwrap_err(),
+            "error unmarshaling patternProperties from json: invalid pattern: (: error parsing regexp: missing closing ): `(`"
         );
     }
 
