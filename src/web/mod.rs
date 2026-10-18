@@ -206,6 +206,11 @@ pub(crate) fn too_large() -> Resp {
     let mut r = text(413, "Request Entity Too Large");
     r.headers_mut()
         .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    // fasthttp's status line (hyper's default reason is "Payload Too Large").
+    r.extensions_mut()
+        .insert(hyper::ext::ReasonPhrase::from_static(
+            b"Request Entity Too Large",
+        ));
     r
 }
 

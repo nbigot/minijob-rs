@@ -227,59 +227,120 @@ fn is_json_content_type(v: &str) -> bool {
         .eq_ignore_ascii_case("application/json")
 }
 
-/// Fiber `c.Body()`: decodes `Content-Encoding` (gzip, deflate, br). Unsupported encodings
-/// give an invalid body, as in Fiber. A decoded body larger than [`super::BODY_LIMIT`] is
-/// refused (`None`): without a limit, a few kilobytes of nested gzip made the server allocate
-/// gigabytes.
+/// Fiber `getSplicedStrList`: the codings of a `Content-Encoding` value, split on commas, with
+/// leading spaces removed. Fiber keeps the end of the previous element in a `uint8`, so past
+/// 255 bytes the elements start at a wrapped offset; that is reproduced.
+fn fiber_codings(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::new();
+    let mut last: u8 = 0;
+    for (index, c) in value.char_indices().chain([(value.len(), '$')]) {
+        if c == ',' || index == value.len() {
+            let element = &bytes[usize::from(last)..index];
+            let start = element.iter().take_while(|&&b| b == b' ').count();
+            out.push(String::from_utf8_lossy(&element[start..]).into_owned());
+            last = (index + 1) as u8;
+        }
+    }
+    out
+}
+
+/// Decodes a brotli stream into `out` (stopping at `max` bytes). As with Go's reader, data
+/// after the end of the stream is an error.
+fn unbrotli(input: &[u8], out: &mut Vec<u8>, max: u64) -> Result<(), String> {
+    use brotli_decompressor::{BrotliDecompressStream, BrotliResult, BrotliState, StandardAlloc};
+    let mut state = BrotliState::new(
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+    );
+    let (mut available_in, mut input_offset) = (input.len(), 0);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let (mut available_out, mut output_offset, mut written) = (buf.len(), 0, 0);
+        let result = BrotliDecompressStream(
+            &mut available_in,
+            &mut input_offset,
+            input,
+            &mut available_out,
+            &mut output_offset,
+            &mut buf,
+            &mut written,
+            &mut state,
+        );
+        out.extend_from_slice(&buf[..output_offset]);
+        if out.len() as u64 >= max {
+            return Ok(());
+        }
+        match result {
+            BrotliResult::NeedsMoreOutput => {}
+            BrotliResult::ResultSuccess if available_in > 0 => {
+                return Err("brotli: excessive input".to_string());
+            }
+            BrotliResult::ResultSuccess => return Ok(()),
+            BrotliResult::NeedsMoreInput => return Err("unexpected EOF".to_string()),
+            BrotliResult::ResultFailure => return Err("brotli: invalid data".to_string()),
+        }
+    }
+}
+
+/// Fiber `c.Body()`: decodes the `Content-Encoding` of the last such header, in the order
+/// listed (Fiber does not reverse it), with the names `gzip`, `deflate`, `br` and `brotli`
+/// (case-sensitive). A single unknown coding leaves the body as is; an unknown coding after
+/// others ends the decoding with what was decoded so far (nothing if it comes first, giving
+/// an empty body). A decoding error makes the error text the body. gzip reads concatenated
+/// members and refuses trailing data, like Go's reader. A decoded body larger than
+/// [`super::BODY_LIMIT`] is refused (`None`): without a limit, a few kilobytes of nested gzip
+/// made the server allocate gigabytes.
 fn decoded_body(req: &Req) -> Option<Vec<u8>> {
     use std::io::Read;
     // One byte more than the limit tells an oversized body from one at the limit.
     let max = super::BODY_LIMIT as u64 + 1;
-    let enc = req.header("content-encoding");
+    let header = req
+        .headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .next_back()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default();
     let mut body = req.body.to_vec();
-    if enc.is_empty() {
+    if header.is_empty() {
         return Some(body);
     }
-    for e in enc
-        .split(',')
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .rev()
-    {
+    let codings = fiber_codings(&header);
+    let mut decoded: Option<Vec<u8>> = None;
+    for coding in &codings {
         let mut out = Vec::new();
-        let ok = match e.to_ascii_lowercase().as_str() {
-            "gzip" | "x-gzip" => flate2::read::GzDecoder::new(&body[..])
+        let result = match coding.as_str() {
+            "gzip" => flate2::read::MultiGzDecoder::new(&body[..])
                 .take(max)
                 .read_to_end(&mut out)
-                .is_ok(),
+                .map(drop)
+                .map_err(|e| e.to_string()),
             "deflate" => flate2::read::ZlibDecoder::new(&body[..])
                 .take(max)
                 .read_to_end(&mut out)
-                .is_ok(),
-            "br" | "brotli" => brotli_decompressor::Decompressor::new(&body[..], 4096)
-                .take(max)
-                .read_to_end(&mut out)
-                .is_ok(),
-            "identity" => {
-                out = body.clone();
-                true
-            }
-            _ => return Some(b"Unsupported Media Type".to_vec()),
+                .map(drop)
+                .map_err(|e| e.to_string()),
+            "br" | "brotli" => unbrotli(&body, &mut out, max),
+            _ if codings.len() == 1 => return Some(body),
+            _ => return Some(decoded.unwrap_or_default()),
         };
         if out.len() as u64 >= max {
             return None;
         }
-        if !ok {
-            return Some(b"unexpected EOF".to_vec());
+        if let Err(e) = result {
+            return Some(e.into_bytes());
         }
-        body = out;
+        body.clone_from(&out);
+        decoded = Some(out);
     }
-    Some(body)
+    Some(decoded.unwrap_or_default())
 }
 
 pub async fn create_job(app: Arc<App>, req: Req) -> Resp {
     const M: &str = "CreateJob";
-    if !is_json_content_type(req.header("content-type")) {
+    if !is_json_content_type(req.last_header("content-type")) {
         return with_metric(
             api_err(&ApiError::new(
                 400,
@@ -920,4 +981,105 @@ pub async fn topics_stats(app: Arc<App>, _: Req) -> Resp {
         ),
         "GetTopicsStats",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn req(encodings: &[&str], body: Vec<u8>) -> Req {
+        let mut headers = http::HeaderMap::new();
+        for e in encodings {
+            headers.append(
+                http::header::CONTENT_ENCODING,
+                http::HeaderValue::from_str(e).unwrap(),
+            );
+        }
+        Req {
+            method: http::Method::POST,
+            path: "/api/v1/job/".into(),
+            query: Vec::new(),
+            headers,
+            body: body.into(),
+            params: Vec::new(),
+            remote: ([127, 0, 0, 1], 1).into(),
+        }
+    }
+
+    fn gz(data: &[u8]) -> Vec<u8> {
+        let mut w = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        w.write_all(data).unwrap();
+        w.finish().unwrap()
+    }
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut w = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        w.write_all(data).unwrap();
+        w.finish().unwrap()
+    }
+
+    /// `{"a":1}` compressed by Go's andybalholm/brotli writer.
+    const BROTLI: &[u8] = b"\x0b\x03\x80{\"a\":1}\x03";
+
+    fn decode(encodings: &[&str], body: Vec<u8>) -> Vec<u8> {
+        decoded_body(&req(encodings, body)).unwrap()
+    }
+
+    #[test]
+    fn codings_split_like_fiber() {
+        assert_eq!(fiber_codings("gzip"), ["gzip"]);
+        assert_eq!(fiber_codings(" gzip , br,,"), ["gzip ", "br", "", ""]);
+        assert_eq!(fiber_codings("\tgzip"), ["\tgzip"]);
+        // Fiber's uint8 offset wraps after 255 bytes.
+        let long = format!("{}gzip", "x,".repeat(140));
+        // The last comma is at 279, 280 wraps to 24.
+        assert_eq!(fiber_codings(&long).last().unwrap(), &long[24..]);
+        assert_eq!(fiber_codings(&long)[127], "x");
+    }
+
+    #[test]
+    fn bodies_decoded_like_fiber() {
+        let j = br#"{"a":1}"#.to_vec();
+        assert_eq!(decode(&[], j.clone()), j);
+        assert_eq!(decode(&["gzip"], gz(&j)), j);
+        assert_eq!(decode(&["deflate"], zlib(&j)), j);
+        assert_eq!(decode(&["br"], BROTLI.to_vec()), j);
+        assert_eq!(decode(&["brotli"], BROTLI.to_vec()), j);
+        // Listed order, not reversed; the last header wins.
+        assert_eq!(decode(&["gzip, deflate"], gz(&zlib(&j))), j);
+        assert_eq!(decode(&["deflate", "gzip"], gz(&j)), j);
+        // Concatenated gzip members are read; trailing data is an error.
+        let mut two = gz(br#"{"a":"#);
+        two.extend(gz(b"1}"));
+        assert_eq!(decode(&["gzip"], two), j);
+        let mut junk = gz(&j);
+        junk.extend(b"junk");
+        assert_ne!(decode(&["gzip"], junk), j);
+        let mut junk = BROTLI.to_vec();
+        junk.push(0);
+        assert_eq!(decode(&["br"], junk), b"brotli: excessive input");
+        // Names are case-sensitive; an unknown coding alone keeps the body as is.
+        assert_eq!(decode(&["GZIP"], gz(&j)), gz(&j));
+        assert_eq!(decode(&["zstd"], j.clone()), j);
+        assert_eq!(decode(&["gzip "], gz(&j)), gz(&j));
+        // An unknown coding after others ends the decoding with what was decoded so far.
+        assert_eq!(decode(&["gzip, identity"], gz(&j)), j);
+        assert_eq!(decode(&["identity, gzip"], gz(&j)), b"");
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&decode(&["gzip"], j.clone())).is_err()
+        );
+    }
+
+    #[test]
+    fn oversized_decoded_body_is_refused() {
+        let big = vec![b' '; super::super::BODY_LIMIT + 1];
+        assert!(decoded_body(&req(&["gzip"], gz(&big))).is_none());
+        assert!(decoded_body(&req(&["deflate"], zlib(&big))).is_none());
+        // 10 MiB + 1 spaces, by Go's andybalholm/brotli writer (level 11).
+        let br_big = b"\xcb\xff\xff\x3f\xf8\x25\x40\xe2\xb1\x40\x20\xf7\xfe\x2f\x01\x00\x40\xf0\x4b\x00\xc4\x61\x11\xc0\xee\xfd\x07";
+        assert!(decoded_body(&req(&["br"], br_big.to_vec())).is_none());
+        let at_limit = vec![b' '; super::super::BODY_LIMIT];
+        assert_eq!(decode(&["gzip"], gz(&at_limit)).len(), at_limit.len());
+    }
 }
