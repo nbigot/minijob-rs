@@ -330,8 +330,7 @@ impl<'a> Parser<'a> {
             let word = if self.peek() == Some(b'"') {
                 self.consume_quoted_string().map(|w| (w, false))
             } else {
-                self.consume_atom(true, true)
-                    .and_then(decode_rfc2047_word)
+                self.consume_atom(true, true).and_then(decode_rfc2047_word)
             };
             match word {
                 Err(e) => {

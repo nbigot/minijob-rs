@@ -211,29 +211,32 @@ fn kind_of(v: &Value) -> String {
 }
 
 /// Evaluates a JSON pointer (RFC 6901) over raw JSON text.
-fn eval_pointer(text: &str, pointer: &str) -> Option<String> {
-    let mut current: Value = serde_json::from_str(text).ok()?;
+/// The target is returned as written in the document (qri-io keeps the raw text of its
+/// subschemas, which `enum` and `contains` messages quote).
+fn eval_pointer<'a>(text: &'a str, pointer: &str) -> Option<&'a str> {
+    let mut current: &'a RawValue = serde_json::from_str(text).ok()?;
     if pointer.is_empty() {
-        return Some(text.to_string());
+        return Some(text);
     }
     for token in pointer.strip_prefix('/')?.split('/') {
         let token = percent_encoding::percent_decode_str(token)
             .decode_utf8_lossy()
             .replace("~1", "/")
             .replace("~0", "~");
-        current = match current {
-            Value::Object(mut m) => m.remove(&token)?,
-            Value::Array(mut a) => {
-                let i: usize = token.parse().ok()?;
-                if i >= a.len() {
-                    return None;
-                }
-                a.swap_remove(i)
+        let raw = current.get();
+        current = match raw.trim_start().as_bytes().first() {
+            // The last duplicate key wins, as when decoding into a map.
+            Some(b'{') => *serde_json::from_str::<HashMap<String, &'a RawValue>>(raw)
+                .ok()?
+                .get(&token)?,
+            Some(b'[') => {
+                let items: Vec<&'a RawValue> = serde_json::from_str(raw).ok()?;
+                *items.get(token.parse::<usize>().ok()?)?
             }
             _ => return None,
         };
     }
-    serde_json::to_string(&current).ok()
+    Some(current.get())
 }
 
 /// Finds a sub-schema by `$anchor` or by a local `$id` (`#name`).
@@ -481,11 +484,11 @@ impl Compiler<'_> {
             // The root itself: its id is 0 once compiled.
             return Ok(Some(0));
         }
-        let raw: Box<RawValue> = RawValue::from_string(text).map_err(|e| e.to_string())?;
+        let raw: &RawValue = serde_json::from_str(text).map_err(|e| e.to_string())?;
         // Reserve the id before compiling to support recursive references.
         let reserved = self.nodes.len();
         self.by_pointer.insert(pointer.clone(), reserved);
-        let id = self.compile("$ref", &raw)?;
+        let id = self.compile("$ref", raw)?;
         if id != reserved {
             self.by_pointer.insert(pointer, id);
         }
@@ -1794,6 +1797,23 @@ mod tests {
             ]
         );
         assert!(check("uri-template", "{x}:80").is_empty());
+    }
+
+    /// A subschema reached through `$ref` keeps its text: `enum` lists the values as written.
+    #[test]
+    fn referenced_schema_keeps_its_text() {
+        // JSON escapes built at run time (a backslash, `u` and four hex digits).
+        let esc = |hex: &str| format!("\"{}u{hex}\"", '\\');
+        let values = format!("[{}, 1e2, 1.0, {}]", esc("003c"), esc("00e9"));
+        let schema =
+            format!(r##"{{"$ref": "#/$defs/e", "$defs": {{"e": {{"enum": {values}}}}}}}"##);
+        let s = Schema::compile(schema.as_bytes()).unwrap();
+        assert_eq!(
+            msgs(&s.validate(&json!("x")))[0].1,
+            format!("should be one of {values}")
+        );
+        assert!(s.validate(&json!(100)).is_empty());
+        assert!(s.validate(&json!("<")).is_empty());
     }
 
     fn format_errors(format: &str, value: &str) -> Vec<String> {
