@@ -1287,29 +1287,9 @@ fn is_rfc3339(s: &str) -> bool {
     }
 }
 
+/// `isValidURIRef`: Go `url.Parse` succeeds and there is no backslash.
 fn check_uri_ref(s: &str) -> Result<(), String> {
-    if s.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}') {
-        return Err(format!(
-            "uri incorrectly Formatted: parse {s:?}: net/url: invalid control character in URL"
-        ));
-    }
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            let ok = b.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
-                && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit);
-            if !ok {
-                let esc: String = s[i..].chars().take(3).collect();
-                return Err(format!(
-                    "uri incorrectly Formatted: parse {s:?}: invalid URL escape {esc:?}"
-                ));
-            }
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
+    crate::gourl::parse(s).map_err(|e| format!("uri incorrectly Formatted: {e}"))?;
     if s.contains('\\') {
         return Err("invalid uri".to_string());
     }
@@ -1412,7 +1392,8 @@ fn check_format(format: &str, s: &str) -> Result<(), String> {
         }
         "iri-reference" | "uri-reference" => check_uri_ref(s),
         "iri" | "uri" => {
-            check_uri_ref(s)?;
+            // `isValidURI`: no backslash check here.
+            crate::gourl::parse(s).map_err(|e| format!("uri incorrectly Formatted: {e}"))?;
             match s.find(':') {
                 Some(i) if i > 0 => Ok(()),
                 _ => Err("uri missing scheme prefix".to_string()),
@@ -1648,6 +1629,59 @@ mod tests {
                 .message
                 .starts_with("invalid date-time: date-time incorrectly Formatted")
         );
+    }
+
+    /// URI formats use the checks of Go's `url.Parse`; only `*-reference` and `uri-template`
+    /// refuse backslashes.
+    #[test]
+    fn uri_formats_like_go() {
+        let check = |format: &str, value: &str| {
+            Schema::compile(format!(r#"{{"format": "{format}"}}"#).as_bytes())
+                .unwrap()
+                .validate(&json!(value))
+                .into_iter()
+                .map(|e| e.message)
+                .collect::<Vec<_>>()
+        };
+        assert!(check("uri", "https://example.com/a?b#c").is_empty());
+        assert_eq!(
+            check("uri", "2026-10-18T12:00:00Z"),
+            [
+                "invalid uri: uri incorrectly Formatted: parse \"2026-10-18T12:00:00Z\": first path segment in URL cannot contain colon"
+            ]
+        );
+        assert_eq!(
+            check("uri-reference", "::1"),
+            [
+                "invalid uri-reference: uri incorrectly Formatted: parse \"::1\": missing protocol scheme"
+            ]
+        );
+        assert_eq!(
+            check("iri", "http://a b/"),
+            [
+                "invalid iri: uri incorrectly Formatted: parse \"http://a b/\": invalid character \" \" in host name"
+            ]
+        );
+        assert!(check("uri", "http://a/b\\c").is_empty());
+        assert_eq!(
+            check("iri-reference", "http://a/b\\c"),
+            ["invalid iri-reference: invalid uri"]
+        );
+        assert_eq!(
+            check("uri", "/a/b"),
+            ["invalid uri: uri missing scheme prefix"]
+        );
+        assert_eq!(
+            check("uri-template", "http://{host}:{port/"),
+            ["invalid uri-template: invalid uri template"]
+        );
+        assert_eq!(
+            check("uri-template", "1{x}:80"),
+            [
+                "invalid uri-template: uri incorrectly Formatted: parse \"1aaa:80\": first path segment in URL cannot contain colon"
+            ]
+        );
+        assert!(check("uri-template", "{x}:80").is_empty());
     }
 
     /// Patterns follow Go's regexp syntax and its ASCII-only `\d`, `\w`, `\s`, `\b`.
