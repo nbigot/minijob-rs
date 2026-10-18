@@ -169,8 +169,8 @@ fn valid_userinfo(s: &str) -> bool {
     })
 }
 
-/// `parseHost`.
-fn parse_host(host: &str) -> Result<(), String> {
+/// `parseHost`: the host as Go stores it in `URL.Host` (decoded, with the port).
+fn parse_host(host: &str) -> Result<Vec<u8>, String> {
     match host.rfind('[') {
         Some(open) if open > 0 => return Err("invalid IP-literal".to_string()),
         Some(_) => {
@@ -181,7 +181,7 @@ fn parse_host(host: &str) -> Result<(), String> {
             if !valid_optional_port(colon_port) {
                 return Err(format!("invalid port {} after host", quote(colon_port)));
             }
-            unescape(colon_port.as_bytes(), Mode::Host)?;
+            let port = unescape(colon_port.as_bytes(), Mode::Host)?;
             let hostname = &host.as_bytes()[1..close];
             let unescaped = match find(hostname, b"%25") {
                 Some(z) => {
@@ -194,7 +194,7 @@ fn parse_host(host: &str) -> Result<(), String> {
             return match parse_addr(&unescaped) {
                 Err(e) => Err(format!("invalid host: {e}")),
                 Ok(Addr::V4) => Err("invalid IP-literal".to_string()),
-                Ok(Addr::V6) => Ok(()),
+                Ok(Addr::V6) => Ok([b"[", &unescaped[..], b"]", &port[..]].concat()),
             };
         }
         None => {
@@ -206,54 +206,77 @@ fn parse_host(host: &str) -> Result<(), String> {
             }
         }
     }
-    unescape(host.as_bytes(), Mode::Host).map(drop)
+    unescape(host.as_bytes(), Mode::Host)
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// `parseAuthority`.
-fn parse_authority(authority: &str) -> Result<(), String> {
+/// `parseAuthority`: the host.
+fn parse_authority(authority: &str) -> Result<Vec<u8>, String> {
     let at = authority.rfind('@');
-    parse_host(match at {
+    let host = parse_host(match at {
         Some(i) => &authority[i + 1..],
         None => authority,
     })?;
     let Some(i) = at else {
-        return Ok(());
+        return Ok(host);
     };
     let userinfo = &authority[..i];
     if !valid_userinfo(userinfo) {
         return Err("net/url: invalid userinfo".to_string());
     }
     match userinfo.split_once(':') {
-        None => unescape(userinfo.as_bytes(), Mode::UserPassword).map(drop),
+        None => unescape(userinfo.as_bytes(), Mode::UserPassword)?,
         Some((user, password)) => {
             unescape(user.as_bytes(), Mode::UserPassword)?;
-            unescape(password.as_bytes(), Mode::UserPassword).map(drop)
+            unescape(password.as_bytes(), Mode::UserPassword)?
         }
-    }
+    };
+    Ok(host)
+}
+
+/// The fields of Go's `url.URL` that callers use (decoded values are bytes, as in Go).
+#[derive(Debug, Default, PartialEq)]
+pub struct Url {
+    /// Lowercase.
+    pub scheme: String,
+    pub opaque: String,
+    pub host: Vec<u8>,
+    pub path: Vec<u8>,
+    pub raw_query: String,
+    pub fragment: Vec<u8>,
 }
 
 /// `parse(rawURL, false)`.
-fn parse_reference(raw: &str) -> Result<(), String> {
+fn parse_reference(raw: &str) -> Result<Url, String> {
     if raw.bytes().any(|b| b < b' ' || b == 0x7f) {
         return Err("net/url: invalid control character in URL".to_string());
     }
+    let mut url = Url::default();
     if raw == "*" {
-        return Ok(());
+        url.path = b"*".to_vec();
+        return Ok(url);
     }
     let (scheme, rest) = get_scheme(raw)?;
+    url.scheme = scheme.to_ascii_lowercase();
     let rest = if rest.ends_with('?') && rest.matches('?').count() == 1 {
         &rest[..rest.len() - 1]
     } else {
-        rest.split_once('?').map_or(rest, |(r, _)| r)
+        match rest.split_once('?') {
+            Some((r, q)) => {
+                url.raw_query = q.to_string();
+                r
+            }
+            None => rest,
+        }
     };
     if !rest.starts_with('/') {
         if !scheme.is_empty() {
             // Opaque: nothing else is checked.
-            return Ok(());
+            url.opaque = rest.to_string();
+            return Ok(url);
         }
         let segment = rest.split_once('/').map_or(rest, |(s, _)| s);
         if segment.contains(':') {
@@ -267,24 +290,22 @@ fn parse_reference(raw: &str) -> Result<(), String> {
             Some(i) => (&authority[..i], &authority[i..]),
             None => (authority, ""),
         };
-        parse_authority(authority)?;
+        url.host = parse_authority(authority)?;
         path = tail;
     }
-    unescape(path.as_bytes(), Mode::Path).map(drop)
+    url.path = unescape(path.as_bytes(), Mode::Path)?;
+    Ok(url)
 }
 
 /// Go `url.Parse(raw)`: `Err` holds the message of the `*url.Error`.
-pub fn parse(raw: &str) -> Result<(), String> {
+pub fn parse(raw: &str) -> Result<Url, String> {
     let (u, frag) = raw.split_once('#').unwrap_or((raw, ""));
-    if let Err(e) = parse_reference(u) {
-        return Err(format!("parse {}: {e}", quote(u)));
+    let mut url = parse_reference(u).map_err(|e| format!("parse {}: {e}", quote(u)))?;
+    if !frag.is_empty() {
+        url.fragment = unescape(frag.as_bytes(), Mode::Fragment)
+            .map_err(|e| format!("parse {}: {e}", quote(raw)))?;
     }
-    if !frag.is_empty()
-        && let Err(e) = unescape(frag.as_bytes(), Mode::Fragment)
-    {
-        return Err(format!("parse {}: {e}", quote(raw)));
-    }
-    Ok(())
+    Ok(url)
 }
 
 // ------------------------------------------------------------------ net/netip
@@ -513,7 +534,7 @@ mod tests {
             "http://a/b\\c",
             "a#b#c",
         ] {
-            assert_eq!(parse(u), Ok(()), "{u}");
+            assert!(parse(u).is_ok(), "{u}");
         }
     }
 
