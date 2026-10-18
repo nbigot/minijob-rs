@@ -238,6 +238,10 @@ fn malformed_bodies() {
     );
     assert_eq!(r.status, 200);
     assert_eq!(r.json()["job"]["topic"], "a\u{FFFD}b");
+    // So is the escape of an unpaired UTF-16 surrogate.
+    let r = s.post_json("/api/v1/job/", r#"{"topic":"a\udc00b"}"#);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["job"]["topic"], "a\u{FFFD}b");
     // A callback with an unsupported scheme does not affect the server.
     let id = s.create(r#"{"topic":"cb","callbackUrl":"file:///etc/passwd"}"#);
     s.wait_state(&id, "queued", Duration::from_secs(3));

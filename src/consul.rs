@@ -221,7 +221,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A Consul agent that answers 200 and records `(request line, X-Consul-Token)`.
-    async fn agent() -> (String, tokio::sync::mpsc::UnboundedReceiver<(String, String)>) {
+    async fn agent() -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -265,7 +268,10 @@ mod tests {
         consul.register().await.unwrap();
         consul.deregister().await;
         let (line, token) = rx.recv().await.unwrap();
-        assert!(line.starts_with("PUT /v1/agent/service/register "), "{line}");
+        assert!(
+            line.starts_with("PUT /v1/agent/service/register "),
+            "{line}"
+        );
         assert_eq!(token, "secret");
         let (line, token) = rx.recv().await.unwrap();
         assert!(
