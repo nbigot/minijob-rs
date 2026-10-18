@@ -11,6 +11,7 @@ pub mod eventlog;
 pub mod events;
 pub mod gojson;
 pub mod goregex;
+pub mod gourl;
 pub mod log;
 pub mod metrics;
 pub mod model;

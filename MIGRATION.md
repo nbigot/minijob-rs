@@ -113,8 +113,13 @@ version that are fixed here; the few deliberate behavior changes are marked **(c
 - `$ref` is resolved inside the schema file, including draft-07 `#/definitions/...`, which
   never resolved in Go. Remote references are not downloaded (Go downloaded them while
   answering a request); they fail with the same message as an unreachable one in Go.
-- The detail text of `format` errors that quoted Go library messages (`date-time`, `email`,
-  `uri`) is an approximation.
+  `#name` references find a subschema with `"$anchor": "name"` or `"$id": "#name"` (Go
+  ignored `$anchor`, and found such an `$id` only once validation had gone through it).
+- `pattern`, `patternProperties` and `format: regex` use Go's regular expression syntax and
+  matching (`\d`, `\w`, `\s`, `\b` are ASCII-only). Script names with an underscore
+  (`\p{Old_Italic}`) are accepted; Go 1.25 refuses them.
+- The detail text of `format` errors that quote Go library messages (`date-time`, `date`,
+  `time`, `email`, `idn-email`) is an approximation; the `uri` family gives Go's messages.
 - The schema is compiled at startup and shared safely between requests (Go modified it on
   first use from concurrent requests).
 

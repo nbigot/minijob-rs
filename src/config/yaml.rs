@@ -332,41 +332,6 @@ pub fn resolve_node(node: &Node) -> (Resolved, String) {
     (resolved, tag)
 }
 
-/// Go `strconv.Quote` (the `%#v` of a string): printable characters as is, the usual
-/// backslash escapes, `\xNN` for other ASCII controls, `\uNNNN` / `\UNNNNNNNN` for other
-/// non-printable characters (approximated with Rust's control and whitespace classes).
-pub fn go_quote(s: &str) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '\u{7}' => out.push_str("\\a"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{b}' => out.push_str("\\v"),
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                let _ = write!(out, "\\x{:02x}", c as u32);
-            }
-            c if c.is_control() || (c.is_whitespace() && c != ' ') || c == '\u{feff}' => {
-                if (c as u32) < 0x10000 {
-                    let _ = write!(out, "\\u{:04x}", c as u32);
-                } else {
-                    let _ = write!(out, "\\U{:08x}", c as u32);
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Collects yaml.v3 type errors while decoding one document.
 #[derive(Debug, Default)]
 pub struct Decoder {
@@ -598,7 +563,7 @@ impl Decoder {
                     self.errors.push(format!(
                         "line {}: mapping key {} already defined at line {}",
                         kj.line,
-                        go_quote(ident(kj).1),
+                        crate::gojson::quote(ident(kj).1),
                         ki.line
                     ));
                 }
@@ -798,17 +763,6 @@ mod tests {
         // Different keys and the same key in different mappings are fine.
         let n = doc("a: {k: 1}\nb: {k: 2}\n");
         assert_eq!(ints(&n).0.len(), 2);
-    }
-
-    #[test]
-    fn go_quoting() {
-        assert_eq!(go_quote("abc"), "\"abc\"");
-        assert_eq!(go_quote("a\"b\\c\n\t"), "\"a\\\"b\\\\c\\n\\t\"");
-        assert_eq!(go_quote("\u{1}\u{7f}é"), "\"\\x01\\x7fé\"");
-        assert_eq!(
-            go_quote("\u{85}\u{a0}\u{feff}"),
-            "\"\\u0085\\u00a0\\ufeff\""
-        );
     }
 
     #[test]
