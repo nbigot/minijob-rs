@@ -202,7 +202,7 @@ impl App {
     }
 }
 
-fn too_large() -> Resp {
+pub(crate) fn too_large() -> Resp {
     let mut r = text(413, "Request Entity Too Large");
     r.headers_mut()
         .insert(header::CONNECTION, HeaderValue::from_static("close"));
