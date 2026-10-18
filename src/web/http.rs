@@ -52,6 +52,16 @@ impl Req {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
     }
+
+    /// Last value of a header: fasthttp keeps the last `Content-Type` of a request.
+    pub fn last_header(&self, name: &str) -> &str {
+        self.headers
+            .get_all(name)
+            .iter()
+            .next_back()
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    }
 }
 
 pub fn parse_query(raw: Option<&str>) -> Vec<(String, String)> {
