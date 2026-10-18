@@ -3,25 +3,28 @@
 use minijob::cli::{self, Action};
 use minijob::log::{self, Logger};
 use minijob::web::{self, Outcome};
+use std::process::ExitCode;
 use std::sync::Arc;
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn main() {
+/// Returns the exit status instead of calling `process::exit`, so that the process ends
+/// normally (on Windows `process::exit` skips the C runtime's exit handlers).
+fn main() -> ExitCode {
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "minijob".to_string());
     let rest: Vec<String> = args.collect();
     let config = match cli::parse(&program, &rest) {
         Ok(Action::Version) => {
             println!("Version: {}", minijob::VERSION);
-            std::process::exit(0);
+            return ExitCode::SUCCESS;
         }
         Ok(Action::Run { config }) => config,
         Err(e) => {
             eprint!("{}", e.stderr);
-            std::process::exit(e.code);
+            return ExitCode::from(u8::try_from(e.code).unwrap_or(1));
         }
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -31,17 +34,17 @@ fn main() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("cannot start the runtime: {e}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
     };
     let code = runtime.block_on(run(config));
     // Background tasks (callbacks in flight) are not awaited, as in Go.
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-    std::process::exit(code);
+    ExitCode::from(code)
 }
 
 /// Loads the configuration and runs the server, again after each restart request.
-async fn run(path: String) -> i32 {
+async fn run(path: String) -> u8 {
     loop {
         let cfg = match minijob::config::load(&path) {
             Ok(c) => c,

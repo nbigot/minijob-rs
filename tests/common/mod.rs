@@ -306,7 +306,29 @@ impl Server {
 }
 
 impl Drop for Server {
+    /// Stops the server through the admin API, so that it exits normally (and writes its
+    /// coverage data under `cargo llvm-cov`); kills it when it does not answer.
     fn drop(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        let url = self.url("/api/v1/admin/server/shutdown");
+        let stopped = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .ok()
+            .and_then(|c| c.post(url).send().ok())
+            .is_some_and(|r| r.status() == 200);
+        if stopped && let Some(child) = self.child.as_mut() {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    self.child = None;
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         self.kill();
     }
 }
