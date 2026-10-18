@@ -3,8 +3,10 @@
 
 pub mod gotime;
 
+use crate::config::yaml::AnyValue;
 pub use crate::config::zap::Level;
 use crate::config::zap::{CallerEncoder, LevelEncoder, TimeEncoder, ZapConfig};
+use chrono::{DateTime, FixedOffset};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -13,7 +15,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::panic::Location;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// A log field value.
 #[derive(Clone, Debug)]
@@ -76,9 +78,10 @@ pub fn any(key: &str, value: &Value) -> Field {
                 FieldValue::Float(n.as_f64().unwrap_or(0.0))
             }
         }
-        other => {
-            FieldValue::Json(String::from_utf8(crate::gojson::to_vec(other)).unwrap_or_default())
-        }
+        // zap reflects other values with `json.Encoder`, without HTML escaping.
+        other => FieldValue::Json(
+            String::from_utf8(crate::gojson::to_vec_no_html(other)).unwrap_or_default(),
+        ),
     };
     Field {
         key: key.to_string(),
@@ -210,12 +213,14 @@ fn zap_float(out: &mut String, f: f64) {
     }
 }
 
-fn push_field(out: &mut String, f: &Field) {
+/// Appends a `"key":value` member; `spaced` is the JSON encoder of zap's console encoder
+/// (`"key": value`, `, ` between members).
+fn push_field(out: &mut String, f: &Field, spaced: bool) {
     if !out.is_empty() && !out.ends_with('{') {
-        out.push(',');
+        out.push_str(if spaced { ", " } else { "," });
     }
     zap_string(out, &f.key);
-    out.push(':');
+    out.push_str(if spaced { ": " } else { ":" });
     match &f.value {
         FieldValue::Str(v) => zap_string(out, v),
         FieldValue::Int(v) => {
@@ -227,6 +232,75 @@ fn push_field(out: &mut String, f: &Field) {
         FieldValue::Float(v) => zap_float(out, *v),
         FieldValue::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
         FieldValue::Json(v) => out.push_str(v),
+    }
+}
+
+/// A time as a zap time encoder appends it.
+enum EncodedTime {
+    Str(String),
+    Float(f64),
+    Int(i64),
+}
+
+impl EncodedTime {
+    /// In JSON (the time key, or a time field).
+    fn push_json(&self, out: &mut String) {
+        match self {
+            EncodedTime::Str(s) => zap_string(out, s),
+            EncodedTime::Float(f) => zap_float(out, *f),
+            EncodedTime::Int(i) => {
+                let _ = write!(out, "{i}");
+            }
+        }
+    }
+
+    /// In the first column of a console line (`fmt.Fprint` of the appended value).
+    fn console(&self) -> String {
+        match self {
+            EncodedTime::Str(s) => s.clone(),
+            EncodedTime::Float(f) => {
+                let mut s = String::new();
+                crate::gojson::fmt_float_v(*f, &mut s);
+                s
+            }
+            EncodedTime::Int(i) => i.to_string(),
+        }
+    }
+}
+
+/// `EncodeTime` of the configuration for `t`; nanoseconds when there is none (zap's
+/// fallback).
+fn encode_time(encoder: Option<&TimeEncoder>, t: &DateTime<FixedOffset>) -> EncodedTime {
+    let nanos = t.timestamp_nanos_opt().unwrap_or(0);
+    match encoder {
+        Some(TimeEncoder::Iso8601) => EncodedTime::Str(gotime::format(t, gotime::ISO8601)),
+        Some(TimeEncoder::Rfc3339) => EncodedTime::Str(gotime::format(t, gotime::RFC3339)),
+        Some(TimeEncoder::Rfc3339Nano) => EncodedTime::Str(gotime::format(t, gotime::RFC3339_NANO)),
+        Some(TimeEncoder::Layout(layout)) => EncodedTime::Str(gotime::format(t, layout)),
+        Some(TimeEncoder::Millis) => EncodedTime::Float(nanos as f64 / 1e6),
+        Some(TimeEncoder::Epoch) => EncodedTime::Float(nanos as f64 / 1e9),
+        Some(TimeEncoder::Nanos) | None => EncodedTime::Int(nanos),
+    }
+}
+
+/// `zap.Any` of an `initialFields` value decoded by yaml.v3.
+fn initial_field(key: &str, value: &AnyValue, encoder: Option<&TimeEncoder>) -> Field {
+    match value {
+        AnyValue::Json(v) => any(key, v),
+        AnyValue::Float(f) => Field {
+            key: key.to_string(),
+            value: FieldValue::Float(*f),
+        },
+        AnyValue::Time(t) => {
+            let mut json = String::new();
+            encode_time(encoder, t).push_json(&mut json);
+            Field {
+                key: key.to_string(),
+                value: FieldValue::Json(json),
+            }
+        }
+        // A reflected value that `json.Marshal` refuses: zap logs the error instead.
+        AnyValue::Unsupported(e) => s(&format!("{key}Error"), e.as_str()),
     }
 }
 
@@ -263,11 +337,13 @@ impl Logger {
         let Some(level) = cfg.level else {
             return Err("missing Level".to_string());
         };
+        // zap sorts the initial fields by key.
         let mut initial = String::new();
-        let mut fields: Vec<&(String, Value)> = cfg.initial_fields.iter().flatten().collect();
+        let mut fields: Vec<&(String, AnyValue)> = cfg.initial_fields.iter().flatten().collect();
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         for (k, v) in fields {
-            push_field(&mut initial, &any(k, v));
+            let f = initial_field(k, v, enc.time_encoder.as_ref());
+            push_field(&mut initial, &f, !json);
         }
         let line_ending = if enc.skip_line_ending {
             String::new()
@@ -331,38 +407,6 @@ impl Logger {
 
     pub fn enabled(&self, level: Level) -> bool {
         level >= self.inner.level && !self.inner.outputs.is_empty()
-    }
-
-    fn encode_time(&self, out: &mut String) {
-        let enc = self.inner.cfg.time_encoder.as_ref();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        match enc {
-            Some(TimeEncoder::Iso8601) => {
-                zap_string(out, &gotime::format(&gotime::now_local(), gotime::ISO8601))
-            }
-            Some(TimeEncoder::Rfc3339) => {
-                zap_string(out, &gotime::format(&gotime::now_local(), gotime::RFC3339))
-            }
-            Some(TimeEncoder::Rfc3339Nano) => zap_string(
-                out,
-                &gotime::format(&gotime::now_local(), gotime::RFC3339_NANO),
-            ),
-            Some(TimeEncoder::Layout(layout)) => {
-                let s = gotime::format(&gotime::now_local(), layout);
-                if s.is_empty() {
-                    let _ = write!(out, "{}", now.as_nanos());
-                } else {
-                    zap_string(out, &s);
-                }
-            }
-            Some(TimeEncoder::Millis) => zap_float(out, now.as_nanos() as f64 / 1e6),
-            Some(TimeEncoder::Nanos) | None => {
-                let _ = write!(out, "{}", now.as_nanos());
-            }
-            Some(TimeEncoder::Epoch) => zap_float(out, now.as_nanos() as f64 / 1e9),
-        }
     }
 
     fn caller_string(&self, loc: &Location<'_>) -> String {
@@ -449,7 +493,7 @@ impl Logger {
             sep(&mut out);
             zap_string(&mut out, &c.time_key);
             out.push(':');
-            self.encode_time(&mut out);
+            encode_time(c.time_encoder.as_ref(), &gotime::now_local()).push_json(&mut out);
         }
         if let Some(caller) = caller {
             if !c.caller_key.is_empty() {
@@ -476,7 +520,7 @@ impl Logger {
             out.push_str(&self.inner.initial);
         }
         for f in fields {
-            push_field(&mut out, f);
+            push_field(&mut out, f, false);
         }
         if let Some(st) = stack {
             sep(&mut out);
@@ -500,9 +544,7 @@ impl Logger {
         let c = &self.inner.cfg;
         let mut parts: Vec<String> = Vec::new();
         if !c.time_key.is_empty() {
-            let mut t = String::new();
-            self.encode_time(&mut t);
-            parts.push(t.trim_matches('"').to_string());
+            parts.push(encode_time(c.time_encoder.as_ref(), &gotime::now_local()).console());
         }
         if !c.level_key.is_empty()
             && let Some(t) = self.level_text(level)
@@ -522,7 +564,7 @@ impl Logger {
             ctx.push_str(&self.inner.initial);
         }
         for f in fields {
-            push_field(&mut ctx, f);
+            push_field(&mut ctx, f, true);
         }
         if !ctx.is_empty() {
             parts.push(format!("{{{ctx}}}"));
@@ -604,7 +646,66 @@ mod tests {
             line,
             "{\"level\":\"info\",\"message\":\"Hello \\\"x\\\"\",\"a\":\"x<y\",\"b\":2,\"topic\":\"server\",\"error\":\"boom\"}\n"
         );
+        // The console encoder writes the fields with zap's spaced JSON encoder.
+        let c = cfg(
+            "logger:\n  level: info\n  encoding: console\n  encoderConfig:\n    messageKey: message\n    levelKey: level\n    levelEncoder: ''\n  initialFields:\n    b: 2\n    a: x<y\n",
+        );
+        let l = Logger::build(&c).unwrap();
         let line = l.encode_console(Level::Warn, "m", &[s("k", "v")], None, None);
-        assert_eq!(line, "warn\tm\t{\"a\":\"x<y\",\"b\":2,\"k\":\"v\"}\n");
+        assert_eq!(line, "warn\tm\t{\"a\": \"x<y\", \"b\": 2, \"k\": \"v\"}\n");
+    }
+
+    /// `initialFields` as zap receives them from yaml.v3: timestamps are `time.Time` (written
+    /// with the time encoder), `.inf` and `.nan` are floats, nested values are reflected
+    /// without HTML escaping, and a nested value JSON cannot hold gives a `<key>Error` field.
+    #[test]
+    fn initial_fields_like_zap() {
+        let c = cfg(concat!(
+            "logger:\n  level: info\n  encoding: json\n",
+            "  encoderConfig: {messageKey: m, timeEncoder: iso8601}\n",
+            "  initialFields:\n",
+            "    date: 2026-10-18\n",
+            "    stamp: 2026-10-18T12:30:00.5+02:00\n",
+            "    notdate: 2026-13-45\n",
+            "    inf: .inf\n",
+            "    nan: .nan\n",
+            "    nested: {b: '<x>', a: [1, 2026-10-18 01:02:03]}\n",
+            "    bad: {a: 1, z: .inf, b: -.inf}\n",
+        ));
+        let l = Logger::build(&c).unwrap();
+        assert_eq!(
+            l.encode_json(Level::Info, "x", &[], None, None),
+            concat!(
+                "{\"m\":\"x\",\"badError\":\"json: unsupported value: -Inf\",",
+                "\"date\":\"2026-10-18T00:00:00.000Z\",\"inf\":\"+Inf\",\"nan\":\"NaN\",",
+                "\"nested\":{\"a\":[1,\"2026-10-18T01:02:03Z\"],\"b\":\"<x>\"},",
+                "\"notdate\":\"2026-13-45\",\"stamp\":\"2026-10-18T12:30:00.500+0200\"}\n"
+            )
+        );
+        let c = cfg(
+            "logger:\n  level: info\n  encoding: json\n  encoderConfig: {timeEncoder: epoch}\n  initialFields: {d: 1970-01-02}\n",
+        );
+        let l = Logger::build(&c).unwrap();
+        assert_eq!(
+            l.encode_json(Level::Info, "x", &[], None, None),
+            "{\"d\":86400}\n"
+        );
+    }
+
+    /// The first column of a console line is `fmt.Fprint` of what the time encoder appended.
+    #[test]
+    fn console_time_column() {
+        assert_eq!(
+            EncodedTime::Float(1792351239514.7505).console(),
+            "1.7923512395147505e+12"
+        );
+        assert_eq!(EncodedTime::Float(1.5).console(), "1.5");
+        assert_eq!(
+            EncodedTime::Int(1792351215722291500).console(),
+            "1792351215722291500"
+        );
+        let mut json = String::new();
+        EncodedTime::Float(1792351239514.7505).push_json(&mut json);
+        assert_eq!(json, "1792351239514.7505");
     }
 }

@@ -1,7 +1,6 @@
 //! `zap.Config` as decoded from YAML by the Go server.
 
 use super::yaml::{Decoder, Kind, Node, Resolved, resolve_node};
-use serde_json::Value;
 
 /// zap levels, in increasing order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -130,7 +129,7 @@ pub struct ZapConfig {
     pub encoder: EncoderConfig,
     pub output_paths: Option<Vec<String>>,
     pub error_output_paths: Option<Vec<String>>,
-    pub initial_fields: Option<Vec<(String, Value)>>,
+    pub initial_fields: Option<Vec<(String, super::yaml::AnyValue)>>,
 }
 
 /// Raw text of a scalar node for `UnmarshalText`; `None` for null or non-scalars.
@@ -283,6 +282,7 @@ pub fn decode(dec: &mut Decoder, node: &Node, out: &mut ZapConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::yaml::AnyValue;
 
     #[test]
     fn levels() {
@@ -311,8 +311,8 @@ mod tests {
         assert_eq!(
             z.initial_fields,
             Some(vec![
-                ("app".into(), "minijob".into()),
-                ("n".into(), 3.into())
+                ("app".into(), AnyValue::Json("minijob".into())),
+                ("n".into(), AnyValue::Json(3.into()))
             ])
         );
         let c = crate::config::parse(

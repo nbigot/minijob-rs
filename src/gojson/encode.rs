@@ -18,7 +18,7 @@ impl Formatter for GoFormatter {
     where
         W: ?Sized + io::Write,
     {
-        write_html_safe(writer, fragment)
+        write_go_string(writer, fragment, true)
     }
 
     fn write_f64<W>(&mut self, writer: &mut W, value: f64) -> io::Result<()>
@@ -38,15 +38,48 @@ impl Formatter for GoFormatter {
     }
 }
 
-fn write_html_safe<W: ?Sized + io::Write>(writer: &mut W, fragment: &str) -> io::Result<()> {
+/// `encoding/json` without HTML escaping (an `Encoder` with `SetEscapeHTML(false)`, which zap
+/// uses for reflected values): U+2028 and U+2029 are still escaped.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GoFormatterNoHtml;
+
+impl Formatter for GoFormatterNoHtml {
+    fn write_string_fragment<W>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        write_go_string(writer, fragment, false)
+    }
+
+    fn write_f64<W>(&mut self, writer: &mut W, value: f64) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        GoFormatter.write_f64(writer, value)
+    }
+
+    fn write_f32<W>(&mut self, writer: &mut W, value: f32) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        GoFormatter.write_f32(writer, value)
+    }
+}
+
+/// Go's string escaping: U+2028 and U+2029 always, `<`, `>` and `&` when `html`.
+fn write_go_string<W: ?Sized + io::Write>(
+    writer: &mut W,
+    fragment: &str,
+    html: bool,
+) -> io::Result<()> {
     let bytes = fragment.as_bytes();
     let mut start = 0;
     let mut i = 0;
     while i < bytes.len() {
         let escape: Option<&[u8]> = match bytes[i] {
-            b'<' => Some(b"\\u003c"),
-            b'>' => Some(b"\\u003e"),
-            b'&' => Some(b"\\u0026"),
+            b'<' if html => Some(b"\\u003c"),
+            b'>' if html => Some(b"\\u003e"),
+            b'&' if html => Some(b"\\u0026"),
             // U+2028 and U+2029 are encoded as E2 80 A8 / E2 80 A9.
             0xE2 if i + 2 < bytes.len() && bytes[i + 1] == 0x80 => match bytes[i + 2] {
                 0xA8 => Some(b"\\u2028"),
@@ -73,6 +106,17 @@ pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     let mut ser = serde_json::Serializer::with_formatter(&mut out, GoFormatter);
     // Serialization into a Vec cannot fail for the types used in this program (string keys only).
+    value
+        .serialize(&mut ser)
+        .expect("JSON serialization into memory");
+    out
+}
+
+/// Serializes `value` like Go's `json.Encoder` with `SetEscapeHTML(false)` (no trailing
+/// newline).
+pub fn to_vec_no_html<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, GoFormatterNoHtml);
     value
         .serialize(&mut ser)
         .expect("JSON serialization into memory");
