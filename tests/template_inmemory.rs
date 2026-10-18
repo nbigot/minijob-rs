@@ -749,6 +749,65 @@ fn system_monitor_and_docs() {
     );
 }
 
+/// `webserver.logs.enable`: Fiber's access log on stdout,
+/// `[time] status - ip:port - latency method path`.
+#[test]
+fn access_log_lines() {
+    let mut s = Server::start_with(T, |c| {
+        c.replace(
+            "    logs:\n        enable: false",
+            "    logs:\n        enable: true",
+        )
+    });
+    s.get("/ping");
+    s.get("/a%20b?x=1");
+    s.post("/api/v1/job/pull?topic=x");
+    s.head("/ping");
+    assert_eq!(s.shutdown().code(), Some(0));
+    let log = s.log();
+    let lines: Vec<&str> = log.lines().filter(|l| l.starts_with('[')).collect();
+    let re = regex::Regex::new(
+        r"^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4}\] (\d{3}) - 127\.0\.0\.1:\d+ - {0,12}\S+ (\S+) (.*)$",
+    )
+    .unwrap();
+    let parsed: Vec<(String, String, String)> = lines
+        .iter()
+        .map(|l| {
+            let c = re
+                .captures(l)
+                .unwrap_or_else(|| panic!("access log line: {l:?}"));
+            (c[1].to_string(), c[2].to_string(), c[3].to_string())
+        })
+        .collect();
+    let expected = [
+        ("200", "GET", "/ping"),
+        ("404", "GET", "/a%20b"),
+        ("404", "POST", "/api/v1/job/pull"),
+        ("200", "HEAD", "/ping"),
+        ("200", "POST", "/api/v1/admin/server/shutdown"),
+    ];
+    for e in expected {
+        assert!(
+            parsed.contains(&(e.0.into(), e.1.into(), e.2.into())),
+            "{e:?} not in {parsed:?}"
+        );
+    }
+    // The latency is a Go duration (`12.5µs`) right-aligned on 13 characters.
+    let line = lines.iter().find(|l| l.ends_with(" GET /ping")).unwrap();
+    let latency = line
+        .split(" - ")
+        .nth(2)
+        .and_then(|l| l.strip_suffix(" GET /ping"))
+        .unwrap();
+    let width = latency.chars().count();
+    assert!(
+        width == 13 || (width > 13 && !latency.starts_with(' ')),
+        "{latency:?}"
+    );
+    let re = regex::Regex::new(r"^ *[0-9.]+(ns|µs|ms|s)$").unwrap();
+    assert!(re.is_match(latency), "{latency:?}");
+}
+
 #[test]
 fn restart_reloads_configuration() {
     let mut s = start();
