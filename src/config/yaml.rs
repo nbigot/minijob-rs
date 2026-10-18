@@ -254,17 +254,106 @@ fn is_yaml_float(s: &str) -> bool {
     i == b.len()
 }
 
-fn looks_like_timestamp(s: &str) -> bool {
-    // yaml.v3 accepts "2006-1-2", "2006-1-2T15:4:5.999999999Z07:00", "2006-1-2 15:4:5.999999999"
-    // and "2006-1-2 15:4:5.999999999 -7". The date part is enough to classify it.
-    let mut parts = s.splitn(2, ['T', 't', ' ']);
-    let date = parts.next().unwrap_or("");
-    let fields: Vec<&str> = date.split('-').collect();
-    fields.len() == 3
-        && fields[0].len() == 4
-        && fields
-            .iter()
-            .all(|f| !f.is_empty() && f.len() <= 4 && f.bytes().all(|c| c.is_ascii_digit()))
+/// yaml.v3 `parseTimestamp`: Go's `time.Parse` with the layouts
+/// `2006-1-2T15:4:5.999999999Z07:00` (also with `t`), `2006-1-2 15:4:5.999999999` and
+/// `2006-1-2`. Times without zone are UTC. A string that only looks like a date
+/// (`2026-13-45`) is not a timestamp.
+pub fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    use chrono::{FixedOffset, NaiveDate, TimeZone};
+    let b = s.as_bytes();
+    if b.len() < 5 || !b[..4].iter().all(u8::is_ascii_digit) || b[4] != b'-' {
+        return None;
+    }
+    let digit = |v: &[u8], i: usize| v.get(i).is_some_and(u8::is_ascii_digit);
+    // `getnum`: one or two digits (`fixed`: exactly two).
+    let getnum = |v: &[u8], fixed: bool| -> Option<(u32, usize)> {
+        if !digit(v, 0) {
+            return None;
+        }
+        if !digit(v, 1) {
+            return (!fixed).then(|| (u32::from(v[0] - b'0'), 1));
+        }
+        Some((u32::from(v[0] - b'0') * 10 + u32::from(v[1] - b'0'), 2))
+    };
+    let year: i32 = s[..4].parse().ok()?;
+    let mut v = &b[5..];
+    let (month, n) = getnum(v, false)?;
+    v = &v[n..];
+    if !(1..=12).contains(&month) || v.first() != Some(&b'-') {
+        return None;
+    }
+    let (day, n) = getnum(&v[1..], false)?;
+    v = &v[1 + n..];
+    let (mut hour, mut minute, mut second, mut nanos, mut offset) = (0, 0, 0, 0, 0);
+    if !v.is_empty() {
+        let zoned = match v[0] {
+            b'T' | b't' => {
+                v = &v[1..];
+                true
+            }
+            // `time.Parse` takes any run of spaces for the space of the layout.
+            b' ' => {
+                v = &v[v.iter().take_while(|&&c| c == b' ').count()..];
+                false
+            }
+            _ => return None,
+        };
+        let field = |v: &mut &[u8], max: u32, sep: Option<u8>| -> Option<u32> {
+            let (n, len) = getnum(v, false)?;
+            *v = &v[len..];
+            if n >= max {
+                return None;
+            }
+            if let Some(sep) = sep {
+                if v.first() != Some(&sep) {
+                    return None;
+                }
+                *v = &v[1..];
+            }
+            Some(n)
+        };
+        hour = field(&mut v, 24, Some(b':'))?;
+        minute = field(&mut v, 60, Some(b':'))?;
+        second = field(&mut v, 60, None)?;
+        if v.len() >= 2 && matches!(v[0], b'.' | b',') && digit(v, 1) {
+            let n = 1 + v[1..].iter().take_while(|c| c.is_ascii_digit()).count();
+            let digits = &v[1..n.min(10)];
+            nanos = digits
+                .iter()
+                .fold(0u32, |acc, d| acc * 10 + u32::from(d - b'0'))
+                * 10u32.pow(9 - digits.len() as u32);
+            v = &v[n..];
+        }
+        if zoned {
+            if v.first() == Some(&b'Z') {
+                v = &v[1..];
+            } else {
+                if v.len() < 6 || v[3] != b':' {
+                    return None;
+                }
+                let (h, _) = getnum(&v[1..3], true)?;
+                let (m, _) = getnum(&v[4..6], true)?;
+                if h > 24 || m > 60 {
+                    return None;
+                }
+                let secs = (h * 3600 + m * 60) as i32;
+                offset = match v[0] {
+                    b'+' => secs,
+                    b'-' => -secs,
+                    _ => return None,
+                };
+                v = &v[6..];
+            }
+        }
+        if !v.is_empty() {
+            return None;
+        }
+    }
+    let local =
+        NaiveDate::from_ymd_opt(year, month, day)?.and_hms_nano_opt(hour, minute, second, nanos)?;
+    FixedOffset::east_opt(offset)?
+        .from_local_datetime(&local)
+        .single()
 }
 
 /// yaml.v3 `resolve` for a scalar with no explicit tag.
@@ -289,7 +378,7 @@ pub fn resolve_plain(value: &str) -> Resolved {
             }
         }
         b'0'..=b'9' | b'+' | b'-' => {
-            if looks_like_timestamp(value) {
+            if parse_timestamp(value).is_some() {
                 return Resolved::Timestamp(value.to_string());
             }
             let plain = value.replace('_', "");
@@ -330,6 +419,19 @@ pub fn resolve_node(node: &Node) -> (Resolved, String) {
         .clone()
         .unwrap_or_else(|| resolved.tag().to_string());
     (resolved, tag)
+}
+
+/// A Go `interface{}` decoded by yaml.v3, as zap receives it in `initialFields`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnyValue {
+    /// Maps, lists, strings, booleans, integers, null and finite floats.
+    Json(serde_json::Value),
+    /// A float that JSON cannot hold (`.inf`, `.nan`).
+    Float(f64),
+    /// A timestamp (`time.Time`).
+    Time(chrono::DateTime<chrono::FixedOffset>),
+    /// A map or list that `json.Marshal` refuses (it holds `.inf` or `.nan`): the error.
+    Unsupported(String),
 }
 
 /// Collects yaml.v3 type errors while decoding one document.
@@ -497,11 +599,11 @@ impl Decoder {
         }
     }
 
-    /// Go `map[string]interface{}` as JSON values (zap `initialFields`).
-    pub fn any_map(&mut self, node: &Node, out: &mut Option<Vec<(String, serde_json::Value)>>) {
+    /// Go `map[string]interface{}` (zap `initialFields`).
+    pub fn any_map(&mut self, node: &Node, out: &mut Option<Vec<(String, AnyValue)>>) {
         match &node.kind {
             Kind::Map(_) => {
-                let mut list: Vec<(String, serde_json::Value)> = Vec::new();
+                let mut list: Vec<(String, AnyValue)> = Vec::new();
                 self.mapping(node, "map[string]interface {}", |dec, key, value| {
                     let v = dec.any(value);
                     match list.iter_mut().find(|(k, _)| k == key) {
@@ -517,29 +619,65 @@ impl Decoder {
         }
     }
 
-    /// Go `interface{}` value converted to JSON.
-    pub fn any(&mut self, node: &Node) -> serde_json::Value {
+    /// Go `interface{}` value.
+    pub fn any(&mut self, node: &Node) -> AnyValue {
+        if let Kind::Scalar { .. } = &node.kind {
+            match resolve_node(node).0 {
+                Resolved::Float(f) if !f.is_finite() => return AnyValue::Float(f),
+                Resolved::Timestamp(s) => {
+                    if let Some(t) = parse_timestamp(&s) {
+                        return AnyValue::Time(t);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match self.json_value(node) {
+            Ok(v) => AnyValue::Json(v),
+            Err(f) => AnyValue::Unsupported(format!(
+                "json: unsupported value: {}",
+                if f.is_nan() {
+                    "NaN"
+                } else if f > 0.0 {
+                    "+Inf"
+                } else {
+                    "-Inf"
+                }
+            )),
+        }
+    }
+
+    /// The JSON of a Go `interface{}` (`json.Marshal`): timestamps as RFC 3339 strings;
+    /// `Err` with the first float JSON cannot hold, in Go's order (sorted keys).
+    fn json_value(&mut self, node: &Node) -> Result<serde_json::Value, f64> {
         use serde_json::Value;
         match &node.kind {
-            Kind::Scalar { .. } => match resolve_node(node).0 {
+            Kind::Scalar { .. } => Ok(match resolve_node(node).0 {
                 Resolved::Null | Resolved::Merge => Value::Null,
                 Resolved::Bool(b) => Value::Bool(b),
                 Resolved::Int(i) => Value::from(i),
                 Resolved::Uint(u) => Value::from(u),
-                Resolved::Float(f) => serde_json::Number::from_f64(f)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
-                Resolved::Str(s) | Resolved::Timestamp(s) => Value::String(s),
-            },
-            Kind::Seq(items) => Value::Array(items.iter().map(|i| self.any(i)).collect()),
+                Resolved::Float(f) => Value::Number(serde_json::Number::from_f64(f).ok_or(f)?),
+                Resolved::Timestamp(s) => Value::String(match parse_timestamp(&s) {
+                    Some(t) => crate::log::gotime::format(&t, crate::log::gotime::RFC3339_NANO),
+                    None => s,
+                }),
+                Resolved::Str(s) => Value::String(s),
+            }),
+            Kind::Seq(items) => items.iter().map(|i| self.json_value(i)).collect(),
             Kind::Map(_) => {
-                let mut map = serde_json::Map::new();
+                let mut members: std::collections::BTreeMap<String, Result<Value, f64>> =
+                    Default::default();
                 self.mapping(node, "map[string]interface {}", |dec, key, value| {
-                    let v = dec.any(value);
-                    map.insert(key.to_string(), v);
+                    let v = dec.json_value(value);
+                    members.insert(key.to_string(), v);
                     true
                 });
-                Value::Object(map)
+                members
+                    .into_iter()
+                    .map(|(k, v)| v.map(|v| (k, v)))
+                    .collect::<Result<serde_json::Map<_, _>, f64>>()
+                    .map(Value::Object)
             }
         }
     }

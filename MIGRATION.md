@@ -190,7 +190,11 @@ Redis:
 ## Logs
 
 - Same zap configuration and JSON line layout. When `disableCaller: false`, the caller is a
-  Rust source file and the function name is empty. YAML syntax error messages differ.
+  Rust source file and the function name is empty; with `disableStacktrace: false` the
+  stack trace is the Rust one. YAML syntax error messages differ.
+- The time zone abbreviation (`MST` in a `timeEncoder` layout, and in the `NextRetryTime`
+  field of verbose logs) is written as the offset, `+0200` (`UTC` when the offset is zero);
+  Go writes the abbreviation of the local zone when it knows it (`CEST`).
 - The access log (`webserver.logs.enable`) has the same format.
 - Same messages and fields. When the admin API stops the server, `Service stopped` comes
   after `Server stopped`: the job service stops once the HTTP server has finished (Go stopped
