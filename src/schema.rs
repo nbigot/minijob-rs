@@ -1530,12 +1530,17 @@ mod tests {
             ]
         );
         assert_eq!(
-            msgs(&s.validate(&json!({"properties": {}, "callbackUrl": "x"}))),
+            msgs(&s.validate(&json!({"properties": {}, "bogus": "x"}))),
             vec![(
                 "/".into(),
                 "additional properties are not allowed".into(),
-                "map[callbackUrl:x properties:map[]]".into()
+                "map[bogus:x properties:map[]]".into()
             )]
+        );
+        // The Go template omitted callbackUrl, so jobs with a callback were refused.
+        assert!(
+            s.validate(&json!({"properties": {}, "callbackUrl": "https://example.com/cb"}))
+                .is_empty()
         );
         assert_eq!(
             msgs(
