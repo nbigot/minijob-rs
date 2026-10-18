@@ -332,6 +332,41 @@ pub fn resolve_node(node: &Node) -> (Resolved, String) {
     (resolved, tag)
 }
 
+/// Go `strconv.Quote` (the `%#v` of a string): printable characters as is, the usual
+/// backslash escapes, `\xNN` for other ASCII controls, `\uNNNN` / `\UNNNNNNNN` for other
+/// non-printable characters (approximated with Rust's control and whitespace classes).
+pub fn go_quote(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{b}' => out.push_str("\\v"),
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c if c.is_control() || (c.is_whitespace() && c != ' ') || c == '\u{feff}' => {
+                if (c as u32) < 0x10000 {
+                    let _ = write!(out, "\\u{:04x}", c as u32);
+                } else {
+                    let _ = write!(out, "\\U{:08x}", c as u32);
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Collects yaml.v3 type errors while decoding one document.
 #[derive(Debug, Default)]
 pub struct Decoder {
@@ -544,9 +579,37 @@ impl Decoder {
         }
     }
 
+    /// yaml.v3 `uniqueKeys`: every key that repeats an earlier one of the same mapping is an
+    /// error (`mapping key "k" already defined at line N`), whether or not the target has a
+    /// field for it. Returns true when there is one; the mapping is then not decoded.
+    fn duplicate_keys(&mut self, entries: &[(Node, Node)]) -> bool {
+        // yaml.v3 compares the node kind and the raw value (empty for collections).
+        fn ident(n: &Node) -> (u8, &str) {
+            match &n.kind {
+                Kind::Scalar { value, .. } => (0, value.as_str()),
+                Kind::Seq(_) => (1, ""),
+                Kind::Map(_) => (2, ""),
+            }
+        }
+        let before = self.errors.len();
+        for (i, (ki, _)) in entries.iter().enumerate() {
+            for (kj, _) in &entries[i + 1..] {
+                if ident(ki) == ident(kj) {
+                    self.errors.push(format!(
+                        "line {}: mapping key {} already defined at line {}",
+                        kj.line,
+                        go_quote(ident(kj).1),
+                        ki.line
+                    ));
+                }
+            }
+        }
+        self.errors.len() > before
+    }
+
     /// Iterates the members of a mapping node (struct or map target), applying merge keys
     /// (`<<`) after the explicit keys, which take precedence. `field` returns `false` for an
-    /// unknown key. Reports yaml.v3's error when a struct field appears twice.
+    /// unknown key (unknown keys are ignored, as in yaml.v3).
     pub fn mapping<F>(&mut self, node: &Node, go_type: &str, mut field: F)
     where
         F: FnMut(&mut Decoder, &str, &Node) -> bool,
@@ -571,8 +634,10 @@ impl Decoder {
             }
             return;
         };
+        if self.duplicate_keys(entries) {
+            return;
+        }
         let mut merges = Vec::new();
-        let mut done: Vec<String> = Vec::new();
         for (k, v) in entries {
             let is_merge = matches!(&k.kind, Kind::Scalar { quoted: false, .. })
                 && k.tag.is_none()
@@ -592,16 +657,7 @@ impl Decoder {
                 // A key already set explicitly (or by an earlier merge) wins over merged ones.
                 continue;
             }
-            if done.contains(&key) {
-                self.errors.push(format!(
-                    "line {}: field {key} already set in type {go_type}",
-                    k.line
-                ));
-                continue;
-            }
-            if field(self, &key, v) {
-                done.push(key.clone());
-            }
+            field(self, &key, v);
             seen.push(key);
         }
         for m in merges {
@@ -694,22 +750,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn merge_and_duplicates() {
-        let n = doc("base: &b {x: 1, y: 2}\nm:\n  <<: *b\n  y: 3\n  y: 4\n");
+    fn ints(n: &Node) -> (Vec<(String, i64)>, Result<(), String>) {
         let mut dec = Decoder::new();
         let mut got = Vec::new();
-        dec.mapping(get(&n, "m"), "T", |d, k, v| {
+        dec.mapping(n, "T", |d, k, v| {
             let mut i = 0i64;
             d.int(v, &mut i, "int");
             got.push((k.to_string(), i));
             true
         });
+        (got, dec.finish())
+    }
+
+    #[test]
+    fn merge_keys() {
+        let n = doc("base: &b {x: 1, y: 2}\nm:\n  <<: *b\n  y: 3\n");
+        let (got, r) = ints(get(&n, "m"));
         assert_eq!(got, vec![("y".into(), 3), ("x".into(), 1)]);
-        assert!(
-            dec.finish()
-                .unwrap_err()
-                .contains("line 5: field y already set in type T")
+        r.unwrap();
+        // The first merged mapping wins over the later ones.
+        let n = doc("a: &a {x: 1}\nb: &b {x: 2, z: 3}\nm:\n  <<: [*a, *b]\n");
+        assert_eq!(ints(get(&n, "m")).0, vec![("x".into(), 1), ("z".into(), 3)]);
+    }
+
+    /// yaml.v3 refuses a repeated key in any mapping, known field or not, and then skips the
+    /// whole mapping (its other errors are not reported).
+    #[test]
+    fn duplicate_keys_like_yaml_v3() {
+        let n = doc("y: 3\nx: abc\ny: 4\nother: 1\nother: 2\ny: 5\n");
+        let (got, r) = ints(&n);
+        assert!(got.is_empty(), "{got:?}");
+        assert_eq!(
+            r.unwrap_err(),
+            "yaml: unmarshal errors:\n  line 3: mapping key \"y\" already defined at line 1\n  line 6: mapping key \"y\" already defined at line 1\n  line 6: mapping key \"y\" already defined at line 3\n  line 5: mapping key \"other\" already defined at line 4"
+        );
+        // Quoted and plain spellings are the same key; nested mappings are checked too.
+        let n = doc("m:\n  'a': 1\n  a: 2\n");
+        let mut dec = Decoder::new();
+        dec.mapping(&n, "T", |d, _, v| {
+            d.mapping(v, "U", |_, _, _| true);
+            true
+        });
+        assert_eq!(
+            dec.finish().unwrap_err(),
+            "yaml: unmarshal errors:\n  line 3: mapping key \"a\" already defined at line 2"
+        );
+        // Different keys and the same key in different mappings are fine.
+        let n = doc("a: {k: 1}\nb: {k: 2}\n");
+        assert_eq!(ints(&n).0.len(), 2);
+    }
+
+    #[test]
+    fn go_quoting() {
+        assert_eq!(go_quote("abc"), "\"abc\"");
+        assert_eq!(go_quote("a\"b\\c\n\t"), "\"a\\\"b\\\\c\\n\\t\"");
+        assert_eq!(go_quote("\u{1}\u{7f}é"), "\"\\x01\\x7fé\"");
+        assert_eq!(
+            go_quote("\u{85}\u{a0}\u{feff}"),
+            "\"\\u0085\\u00a0\\ufeff\""
         );
     }
 
