@@ -46,6 +46,8 @@ version that are fixed here; the few deliberate behavior changes are marked **(c
 - A client that does not send its headers within 10 s is disconnected (same timeout as Go).
 - Bodies above 10 MiB get `413 Request Entity Too Large`, as in Go.
 - Request bodies compressed with `gzip`, `deflate` or `br` (`Content-Encoding`) are decoded, as in Go.
+  A body larger than 10 MiB once decoded gets `413 Request Entity Too Large`; Go decoded it
+  without limit, so a few kilobytes of nested gzip could exhaust the server's memory.
 - JSON nesting deeper than 128 levels is refused with the usual `400` (Go accepted up to
   10,000).
 - `/debug/pprof/*` (Go profiles) is not available: 404. `/monitor` is available; its CPU and

@@ -228,13 +228,17 @@ fn is_json_content_type(v: &str) -> bool {
 }
 
 /// Fiber `c.Body()`: decodes `Content-Encoding` (gzip, deflate, br). Unsupported encodings
-/// give an invalid body, as in Fiber.
-fn decoded_body(req: &Req) -> Vec<u8> {
+/// give an invalid body, as in Fiber. A decoded body larger than [`super::BODY_LIMIT`] is
+/// refused (`None`): without a limit, a few kilobytes of nested gzip made the server allocate
+/// gigabytes.
+fn decoded_body(req: &Req) -> Option<Vec<u8>> {
     use std::io::Read;
+    // One byte more than the limit tells an oversized body from one at the limit.
+    let max = super::BODY_LIMIT as u64 + 1;
     let enc = req.header("content-encoding");
     let mut body = req.body.to_vec();
     if enc.is_empty() {
-        return body;
+        return Some(body);
     }
     for e in enc
         .split(',')
@@ -245,26 +249,32 @@ fn decoded_body(req: &Req) -> Vec<u8> {
         let mut out = Vec::new();
         let ok = match e.to_ascii_lowercase().as_str() {
             "gzip" | "x-gzip" => flate2::read::GzDecoder::new(&body[..])
+                .take(max)
                 .read_to_end(&mut out)
                 .is_ok(),
             "deflate" => flate2::read::ZlibDecoder::new(&body[..])
+                .take(max)
                 .read_to_end(&mut out)
                 .is_ok(),
             "br" | "brotli" => brotli_decompressor::Decompressor::new(&body[..], 4096)
+                .take(max)
                 .read_to_end(&mut out)
                 .is_ok(),
             "identity" => {
                 out = body.clone();
                 true
             }
-            _ => return b"Unsupported Media Type".to_vec(),
+            _ => return Some(b"Unsupported Media Type".to_vec()),
         };
+        if out.len() as u64 >= max {
+            return None;
+        }
         if !ok {
-            return b"unexpected EOF".to_vec();
+            return Some(b"unexpected EOF".to_vec());
         }
         body = out;
     }
-    body
+    Some(body)
 }
 
 pub async fn create_job(app: Arc<App>, req: Req) -> Resp {
@@ -279,7 +289,9 @@ pub async fn create_job(app: Arc<App>, req: Req) -> Resp {
             M,
         );
     }
-    let payload = decoded_body(&req);
+    let Some(payload) = decoded_body(&req) else {
+        return with_metric(super::too_large(), M);
+    };
     if let Some(schema) = &app.schema {
         let Ok(doc) = crate::gojson::decode::parse_value(&payload) else {
             return with_metric(

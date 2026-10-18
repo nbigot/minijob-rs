@@ -118,6 +118,41 @@ fn request_limits() {
     assert_eq!(s.get("/ping").status, 200);
 }
 
+fn gzip(data: &[u8]) -> Vec<u8> {
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    gz.write_all(data).unwrap();
+    gz.finish().unwrap()
+}
+
+#[test]
+fn compressed_bodies_are_limited_once_decoded() {
+    let s = Server::start(T);
+    let send = |encoding: &str, body: Vec<u8>| {
+        s.send(
+            s.request("POST", "/api/v1/job/")
+                .header("Content-Type", "application/json")
+                .header("Content-Encoding", encoding)
+                .body(body),
+        )
+    };
+    // 10 MiB + 1 of spaces: a few kilobytes on the wire, refused once decoded.
+    let over = gzip(&vec![b' '; 10_485_761]);
+    assert!(over.len() < 20_000);
+    let r = send("gzip", over);
+    assert_eq!(r.status, 413, "{}", r.text());
+    // Nested encodings multiply the ratio: 64 MiB in a few hundred bytes.
+    let bomb = gzip(&gzip(&vec![0u8; 1 << 26]));
+    assert!(bomb.len() < 1_000);
+    let r = send("gzip, gzip", bomb);
+    assert_eq!(r.status, 413, "{}", r.text());
+    // A decoded body of exactly the limit is read (and rejected as JSON, not as too large).
+    let mut max = vec![b' '; 10_485_760];
+    max[..2].copy_from_slice(b"{}");
+    let r = send("gzip", gzip(&max));
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(s.get("/ping").status, 200);
+}
+
 #[test]
 fn request_smuggling_is_rejected() {
     let s = Server::start(T);
