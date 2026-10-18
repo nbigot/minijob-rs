@@ -18,4 +18,4 @@ mod quote;
 pub use encode::{GoFormatter, format_float, to_vec, write_string};
 pub(crate) use encode::{push_plain, shortest_digits};
 pub use fmt_v::{fmt_float_v, fmt_v};
-pub use quote::{quote, quote_bytes};
+pub use quote::{quote, quote_bytes, quote_rune};

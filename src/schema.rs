@@ -1224,67 +1224,191 @@ fn hostname_re() -> &'static Regex {
     })
 }
 
-/// Go `time.Parse(time.RFC3339, s)` acceptance (fractional seconds allowed).
-fn is_rfc3339(s: &str) -> bool {
-    let b = s.as_bytes();
-    let digits = |r: std::ops::Range<usize>| {
-        b.get(r.clone())
-            .is_some_and(|x| x.iter().all(u8::is_ascii_digit))
-    };
-    let num =
-        |r: std::ops::Range<usize>| s.get(r).and_then(|x| x.parse::<u32>().ok()).unwrap_or(99);
-    if b.len() < 20
-        || !digits(0..4)
-        || b[4] != b'-'
-        || !digits(5..7)
-        || b[7] != b'-'
-        || !digits(8..10)
-        || b[10] != b'T'
-        || !digits(11..13)
-        || b[13] != b':'
-        || !digits(14..16)
-        || b[16] != b':'
-        || !digits(17..19)
-    {
-        return false;
+/// `quote` of Go's `time` package: bytes of non-ASCII and control characters as `\xNN`.
+fn time_quote(s: &[u8]) -> String {
+    let mut out = String::from("\"");
+    for chunk in s.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            if !c.is_ascii() || c < ' ' {
+                for b in c.encode_utf8(&mut [0; 4]).bytes() {
+                    out.push_str(&format!("\\x{b:02x}"));
+                }
+            } else {
+                if c == '"' || c == '\\' {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+        }
+        for b in chunk.invalid() {
+            out.push_str(&format!("\\x{b:02x}"));
+        }
     }
-    let (month, day, hour, min, sec) =
-        (num(5..7), num(8..10), num(11..13), num(14..16), num(17..19));
-    let year: i32 = s[0..4].parse().unwrap_or(0);
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    out.push('"');
+    out
+}
+
+/// Go `strings.ToUpper` (one-to-one mappings only, like `unicode.ToUpper`).
+fn go_to_upper(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            let mut up = c.to_uppercase();
+            match (up.next(), up.next()) {
+                (Some(u), None) => u,
+                _ => c,
+            }
+        })
+        .collect()
+}
+
+/// Go `time.Parse(time.RFC3339, value)`: the generic parser of `time/format.go` on the layout
+/// `2006-01-02T15:04:05Z07:00` (the RFC 3339 fast path accepts a subset of it), with its error
+/// messages. Unlike RFC 3339, Go accepts a one-digit hour, a comma before the fraction and
+/// zone offsets up to `+24:60`.
+fn parse_rfc3339(value: &[u8]) -> Result<(), String> {
+    const LAYOUT: &[u8] = b"2006-01-02T15:04:05Z07:00";
+    let parse_error = |layout_elem: &[u8], value_elem: &[u8]| {
+        format!(
+            "parsing time {} as {}: cannot parse {} as {}",
+            time_quote(value),
+            time_quote(LAYOUT),
+            time_quote(value_elem),
+            time_quote(layout_elem)
+        )
+    };
+    let range_error =
+        |what: &str| format!("parsing time {}: {what} out of range", time_quote(value));
+    let digit = |s: &[u8], i: usize| s.get(i).is_some_and(u8::is_ascii_digit);
+    // `getnum`: one or two digits (`fixed`: exactly two).
+    let getnum = |s: &[u8], fixed: bool| -> Option<(i64, usize)> {
+        if !digit(s, 0) {
+            return None;
+        }
+        if !digit(s, 1) {
+            return (!fixed).then(|| (i64::from(s[0] - b'0'), 1));
+        }
+        Some((i64::from(s[0] - b'0') * 10 + i64::from(s[1] - b'0'), 2))
+    };
+    let mut v = value;
+    let (mut year, mut month, mut day) = (0i64, 1i64, 1i64);
+    // (literal before the element, element of the layout)
+    let chunks: [(&[u8], &[u8]); 7] = [
+        (b"", b"2006"),
+        (b"-", b"01"),
+        (b"-", b"02"),
+        (b"T", b"15"),
+        (b":", b"04"),
+        (b":", b"05"),
+        (b"", b"Z07:00"),
+    ];
+    for (prefix, elem) in chunks {
+        if !prefix.is_empty() {
+            if !v.starts_with(prefix) {
+                return Err(parse_error(prefix, v));
+            }
+            v = &v[prefix.len()..];
+        }
+        let hold = v;
+        let mut range = None;
+        let ok = match elem {
+            b"2006" => {
+                // Four bytes, the first a digit; `atoi` refuses anything else.
+                let ok = v.len() >= 4 && v[..4].iter().all(u8::is_ascii_digit);
+                if ok {
+                    year = v[..4].iter().fold(0, |y, d| y * 10 + i64::from(d - b'0'));
+                    v = &v[4..];
+                }
+                ok
+            }
+            b"01" | b"02" | b"04" => match getnum(v, true) {
+                Some((n, len)) => {
+                    v = &v[len..];
+                    match elem {
+                        b"01" => {
+                            month = n;
+                            if !(1..=12).contains(&n) {
+                                range = Some("month");
+                            }
+                        }
+                        b"02" => day = n,
+                        _ if n >= 60 => range = Some("minute"),
+                        _ => {}
+                    }
+                    true
+                }
+                None => false,
+            },
+            b"15" => match getnum(v, false) {
+                Some((n, len)) => {
+                    v = &v[len..];
+                    if n >= 24 {
+                        range = Some("hour");
+                    }
+                    true
+                }
+                None => false,
+            },
+            b"05" => match getnum(v, true) {
+                Some((n, len)) => {
+                    v = &v[len..];
+                    if n >= 60 {
+                        range = Some("second");
+                    } else if v.len() >= 2 && matches!(v[0], b'.' | b',') && digit(v, 1) {
+                        // A fraction without a fraction in the layout: any number of digits.
+                        let n = 2 + v[2..].iter().take_while(|c| c.is_ascii_digit()).count();
+                        v = &v[n..];
+                    }
+                    true
+                }
+                None => false,
+            },
+            _ => {
+                if v.first() == Some(&b'Z') {
+                    v = &v[1..];
+                    true
+                } else if v.len() < 6 || v[3] != b':' {
+                    false
+                } else {
+                    let (sign, hour, min) = (v[0], &v[1..3], &v[4..6]);
+                    v = &v[6..];
+                    let hr = getnum(hour, true);
+                    let mm = hr.and_then(|_| getnum(min, true));
+                    let (h, m) = (hr.map_or(0, |x| x.0), mm.map_or(0, |x| x.0));
+                    if h > 24 {
+                        range = Some("time zone offset hour");
+                    }
+                    if m > 60 {
+                        range = Some("time zone offset minute");
+                    }
+                    mm.is_some() && matches!(sign, b'+' | b'-')
+                }
+            }
+        };
+        if let Some(what) = range {
+            return Err(range_error(what));
+        }
+        if !ok {
+            return Err(parse_error(elem, hold));
+        }
+    }
+    if !v.is_empty() {
+        return Err(format!(
+            "parsing time {}: extra text: {}",
+            time_quote(value),
+            time_quote(v)
+        ));
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
         2 if leap => 29,
         2 => 28,
-        _ => return false,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
     };
-    if day == 0 || day > days || hour > 23 || min > 59 || sec > 59 {
-        return false;
+    if day < 1 || day > days {
+        return Err(range_error("day"));
     }
-    let mut i = 19;
-    if b[i] == b'.' {
-        i += 1;
-        let start = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == start {
-            return false;
-        }
-    }
-    match &s[i..] {
-        "Z" => true,
-        z if z.len() == 6
-            && (z.starts_with('+') || z.starts_with('-'))
-            && z.as_bytes()[3] == b':'
-            && z[1..3].bytes().all(|c| c.is_ascii_digit())
-            && z[4..6].bytes().all(|c| c.is_ascii_digit()) =>
-        {
-            num(i + 1..i + 3) < 24 && num(i + 4..i + 6) < 60
-        }
-        _ => false,
-    }
+    Ok(())
 }
 
 /// `isValidURIRef`: Go `url.Parse` succeeds and there is no backslash.
@@ -1316,32 +1440,15 @@ fn check_json_pointer(p: &str) -> Result<(), String> {
 /// `format` checks of qri-io (`keywords_optional.go`).
 fn check_format(format: &str, s: &str) -> Result<(), String> {
     let datetime = |dt: &str| {
-        if is_rfc3339(&dt.to_uppercase()) {
-            Ok(())
-        } else {
-            Err(format!(
-                "date-time incorrectly Formatted: parsing time {:?} as \"2006-01-02T15:04:05Z07:00\": cannot parse {:?} as \"2006\"",
-                dt.to_uppercase(),
-                dt.to_uppercase()
-            ))
-        }
+        parse_rfc3339(go_to_upper(dt).as_bytes())
+            .map_err(|e| format!("date-time incorrectly Formatted: {e}"))
     };
     match format {
         "date-time" => datetime(s),
         "date" => datetime(&format!("{s}T08:30:06.283185Z")),
         "time" => datetime(&format!("1963-06-19T{s}")),
-        "email" | "idn-email" => {
-            let addr = s
-                .rsplit_once('<')
-                .map_or(s, |(_, a)| a.trim_end_matches('>'));
-            match addr.split_once('@') {
-                Some((l, d)) if !l.is_empty() && !d.is_empty() && !d.contains('@') => Ok(()),
-                _ => Err(
-                    "email address incorrectly Formatted: mail: missing '@' or angle-addr"
-                        .to_string(),
-                ),
-            }
-        }
+        "email" | "idn-email" => crate::gomail::parse_address(s)
+            .map_err(|e| format!("email address incorrectly Formatted: {e}")),
         "hostname" => {
             if hostname_re().is_match(s) && s.len() <= 255 {
                 Ok(())
@@ -1414,7 +1521,12 @@ fn check_format(format: &str, s: &str) -> Result<(), String> {
             if parts.len() == 1 {
                 parts = s.split('#').collect();
             }
-            if parts[0].is_empty() || !parts[0].bytes().all(|c| c.is_ascii_digit()) {
+            // `strconv.Atoi(parts[0])`: optional sign, decimal digits, an int64; then `i >= 0`.
+            let digits = parts[0].strip_prefix(['+', '-']).unwrap_or(parts[0]);
+            let atoi = (!digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit()))
+                .then(|| parts[0].parse::<i64>().ok())
+                .flatten();
+            if atoi.is_none_or(|i| i < 0) {
                 return Err("RJP must begin with positive integer".to_string());
             }
             let rest = &s[parts[0].len()..];
@@ -1682,6 +1794,133 @@ mod tests {
             ]
         );
         assert!(check("uri-template", "{x}:80").is_empty());
+    }
+
+    fn format_errors(format: &str, value: &str) -> Vec<String> {
+        Schema::compile(format!(r#"{{"format": "{format}"}}"#).as_bytes())
+            .unwrap()
+            .validate(&json!(value))
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    /// `date-time`, `date` and `time` use Go's `time.Parse`, which accepts more than
+    /// RFC 3339 (one-digit hour, comma before the fraction, offset up to +24:60).
+    #[test]
+    fn date_time_formats_like_go() {
+        for (f, v) in [
+            ("date-time", "2026-10-18T12:00:00Z"),
+            ("date-time", "2026-10-18t12:00:00.5+02:00"),
+            ("date-time", "2026-10-18T9:00:00Z"),
+            ("date-time", "2024-02-29T12:00:00,123456789012Z"),
+            ("date-time", "2026-10-18T12:00:00+24:60"),
+            ("time", "9:01:02Z"),
+            ("date", "2026-10-18"),
+        ] {
+            assert!(format_errors(f, v).is_empty(), "{f} {v}");
+        }
+        let prefix = "invalid date-time: date-time incorrectly Formatted: parsing time";
+        for (f, v, e) in [
+            (
+                "date-time",
+                "2026-10-18",
+                r#""2026-10-18" as "2006-01-02T15:04:05Z07:00": cannot parse "" as "T""#,
+            ),
+            (
+                "date-time",
+                "2026-1-18T12:00:00Z",
+                r#""2026-1-18T12:00:00Z" as "2006-01-02T15:04:05Z07:00": cannot parse "1-18T12:00:00Z" as "01""#,
+            ),
+            (
+                "date-time",
+                "2026-13-18T12:00:00Z",
+                r#""2026-13-18T12:00:00Z": month out of range"#,
+            ),
+            (
+                "date-time",
+                "2026-02-29T12:00:00Z",
+                r#""2026-02-29T12:00:00Z": day out of range"#,
+            ),
+            (
+                "date-time",
+                "2026-10-18T24:00:00Z",
+                r#""2026-10-18T24:00:00Z": hour out of range"#,
+            ),
+            (
+                "date-time",
+                "2026-10-18T12:00:00+25:00",
+                r#""2026-10-18T12:00:00+25:00": time zone offset hour out of range"#,
+            ),
+            (
+                "date-time",
+                "2026-10-18T12:00:00Zx",
+                r#""2026-10-18T12:00:00ZX": extra text: "X""#,
+            ),
+            (
+                "date-time",
+                "é",
+                r#""\xc3\x89" as "2006-01-02T15:04:05Z07:00": cannot parse "\xc3\x89" as "2006""#,
+            ),
+            (
+                "date-time",
+                "2026-10-18T12:00:00+0200",
+                r#""2026-10-18T12:00:00+0200" as "2006-01-02T15:04:05Z07:00": cannot parse "+0200" as "Z07:00""#,
+            ),
+        ] {
+            assert_eq!(format_errors(f, v), [format!("{prefix} {e}")], "{v}");
+        }
+        assert_eq!(
+            format_errors("date", "2026-10-32"),
+            [
+                r#"invalid date: date-time incorrectly Formatted: parsing time "2026-10-32T08:30:06.283185Z": day out of range"#
+            ]
+        );
+    }
+
+    /// `email` and `idn-email` use Go's `mail.ParseAddress`.
+    #[test]
+    fn email_formats_like_go() {
+        for v in [
+            "a@b.c",
+            "A B <a@b.c>",
+            "\"x y\"@b",
+            "a@[127.0.0.1]",
+            "g: a@b;",
+        ] {
+            assert!(format_errors("email", v).is_empty(), "{v}");
+        }
+        for (v, e) in [
+            ("a", "mail: missing '@' or angle-addr"),
+            ("a b", "mail: no angle-addr"),
+            ("a@b c", "mail: expected single address, got \"c\""),
+            (
+                "<a@[1.2.3]>",
+                "mail: invalid IP address in domain-literal: \"1.2.3\"",
+            ),
+            (
+                "]]02@2000190000",
+                "mail: missing word in phrase: mail: invalid string",
+            ),
+        ] {
+            assert_eq!(
+                format_errors("idn-email", v),
+                [format!(
+                    "invalid idn-email: email address incorrectly Formatted: {e}"
+                )]
+            );
+        }
+    }
+
+    /// The number of a relative JSON pointer is read with `strconv.Atoi`.
+    #[test]
+    fn relative_json_pointer_like_go() {
+        for v in ["0", "1/a", "+1", "-0/a", "2#", "9223372036854775807"] {
+            assert!(format_errors("relative-json-pointer", v).is_empty(), "{v}");
+        }
+        for v in ["", "-1", "a", "1a", "9223372036854775808", "1/a~2", "+"] {
+            assert!(!format_errors("relative-json-pointer", v).is_empty(), "{v}");
+        }
     }
 
     /// Patterns follow Go's regexp syntax and its ASCII-only `\d`, `\w`, `\s`, `\b`.
