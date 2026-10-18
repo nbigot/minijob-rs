@@ -287,9 +287,19 @@ impl Service {
             if let Some(l) = &self.event_log {
                 l.job_event(ServiceEvent::JobLoaded, &job);
             }
-            self.metrics
-                .update_resources_locked(&job.topic, job.count_lock_resources() as i64);
+            self.metrics.ensure_topic(&job.topic);
             st.insert(job);
+        }
+        // Locks actually held, per topic of the owner: a resource listed twice by a job, or
+        // also claimed by a later job, counts once (releases never count it twice).
+        let mut locked: HashMap<&str, i64> = HashMap::new();
+        for owner in st.locks.values() {
+            if let Some(j) = st.jobs.get(owner) {
+                *locked.entry(j.topic.as_str()).or_default() += 1;
+            }
+        }
+        for (topic, n) in locked {
+            self.metrics.update_resources_locked(topic, n);
         }
         st.generation = 0;
         // A job saved between CREATE and PENDING (Go never schedules it).
@@ -1399,6 +1409,30 @@ logger: {level: error, encoding: json}
         completed_job(&svc, false).await;
         svc.apply_retention().await;
         assert_eq!(svc.jobs_count(), 1);
+    }
+
+    fn locked_count(svc: &Service, topic: &str) -> u64 {
+        svc.metrics().job_metrics_by_topic()[topic][0].resources_locked_count
+    }
+
+    #[tokio::test]
+    async fn restored_locks_are_counted_once() {
+        let svc = service(-1, -1).await;
+        let mut running = Job {
+            topic: "r".into(),
+            lock_resources: Some(vec!["a".into(), "a".into(), "b".into()]),
+            ..Default::default()
+        };
+        running.init(Uuid::now_v7(), now_ms());
+        for e in [events::PENDING, events::ENQUEUE, events::START] {
+            running.add_event(e, now_ms());
+        }
+        let id = running.id;
+        svc.restore(vec![running]);
+        assert_eq!(locked_count(&svc, "r"), 2);
+        svc.succeed(id).await.unwrap();
+        assert!(svc.locked_resources().is_empty());
+        assert_eq!(locked_count(&svc, "r"), 0);
     }
 
     #[tokio::test]
