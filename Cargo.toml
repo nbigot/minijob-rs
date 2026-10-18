@@ -1,0 +1,66 @@
+[package]
+name = "minijob"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Minijob: a job queue and task scheduling service with an HTTP API"
+license = "MIT"
+repository = "https://github.com/nbigot/minijob-rs"
+readme = "README.md"
+keywords = ["job-queue", "scheduler", "http", "redis"]
+categories = ["web-programming::http-server"]
+publish = false
+
+[[bin]]
+name = "minijob"
+path = "src/main.rs"
+
+# The load generator (`bench/`) shares the lock file and the release profile.
+[workspace]
+members = ["bench"]
+
+[features]
+default = ["redis", "swagger-ui"]
+# Redis backend (`backend.type: redis`).
+redis = ["dep:redis", "dep:url"]
+# Swagger UI under /docs (embeds the swagger-ui assets, about 1.4 MB).
+swagger-ui = []
+# mimalloc as the global allocator (recommended for musl builds).
+mimalloc = ["dep:mimalloc"]
+
+[dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "time", "sync", "signal", "fs", "io-util", "macros"] }
+hyper = { version = "1.12", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "server-graceful", "service"] }
+http = "1.5"
+http-body-util = "0.1.5"
+bytes = "1.12"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+yaml-rust2 = { version = "0.13", default-features = false }
+uuid = { version = "1.28", features = ["v7", "serde"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+parking_lot = "0.12.5"
+thiserror = "2.0"
+regex = "1.13"
+prometheus = { version = "0.14", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+percent-encoding = "2.3"
+form_urlencoded = "1.2"
+flate2 = "1.1"
+brotli-decompressor = "6.1"
+redis = { version = "1.7", optional = true, default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
+mimalloc = { version = "0.1.52", optional = true, default-features = false }
+url = { version = "2.5", optional = true }
+
+[dev-dependencies]
+tempfile = "3.27"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "blocking"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

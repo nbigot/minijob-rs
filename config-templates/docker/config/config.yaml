@@ -1,0 +1,128 @@
+# Configuration file for minijob server
+environment: "docker"
+jobs:
+    # bulkFlushFrequency: 2
+    # bulkMaxSize: 100
+    # channelBufferSize: 2000
+    # maxAllowedIteratorsPerStream: 1000
+    # maxMessagePerGetOperation: 10000
+    logVerbosity: 1
+    maxAllowedJobs: 0 # Maximum number of jobs allowed to be created (0 means no limit)
+    jsonSchema:
+        enable: true  # Enable JSON schema validation for job data
+        path: "./config/schema.json" # Path to JSON schema file
+    retentionPolicy:
+        enable: true
+        interval: 60
+        maxJobs: 10000
+        maxJobAge: 3600
+    retryPolicy:
+        maxRetry: 3
+        backoffStrategy:
+            base: 2
+            factor: 2
+            maxDuration: 60
+    defaultVisibilityTimeout: 60  # Default visibility timeout in seconds (1 minute)
+    maxVisibilityTimeout: 86400 # Maximum visibility timeout in seconds (24 hours)
+backend:
+    logger:
+        level: "info"
+        development: false
+        disableCaller: true
+        disableStacktrace: true
+        encoding: "json"
+        encoderConfig:
+            messageKey: "message"
+            levelKey: "level"
+            timeKey: "timestamp"
+            nameKey: "name"
+            callerKey: "caller"
+            functionKey: "func"
+            stacktraceKey: "stacktrace"
+            skipLineEnding: false
+            lineEnding: "\n"
+            levelEncoder: ""
+            timeEncoder: "iso8601"
+            durationEncoder: ""
+            callerEncoder: ""
+        outputPaths:
+            - "stdout"
+        errorOutputPaths:
+            - "stdout"
+        initialFields:
+            app: "minijob"
+            backend.provider: "inMemory"  # "redis" "inMemory"
+    logVerbosity: 3
+    type: "inMemory"  # "redis" "inMemory"
+    redis:
+        url: "redis://localhost:6379/3?dial_timeout=3&db=1&read_timeout=6s&max_retries=2&client_name=minijob"
+        maxJobs: 100000
+        finishedJobTTL: 86400
+    inMemory:
+        maxJobs: 100000
+        writeFrequency: 30
+        enablePersistentStorage: true
+        directory: "/app/data"  # Directory for persistent storage
+        filename: "jobs.json"
+webserver:
+    cors:
+        enable: true
+        allowOrigins: "*"
+        allowHeaders: ""
+    logs:
+        enable: false
+    monitor:
+        enable: true
+    metrics:
+        enable: true
+    http:
+        enable: true
+        address: "0.0.0.0:8080"
+    swagger:
+        enable: true
+consul:
+    enable: false
+    server:
+        address: "127.0.0.1"
+        port: 8080
+        token: ""
+        replaceExistingChecks: false
+        # ttl: 15
+    service:
+        id: "minijob"
+        name: "minijob"
+        tags: ["jobs"]
+        namespace: ""
+        partition: ""
+    healthCheck:
+        enable: false
+        checkId: "alive"
+        interval: "10s"
+        timeout: "5s"
+        url: "http://0.0.0.0:8080/healthcheck"
+logger:
+    level: "info"
+    development: false
+    disableCaller: true
+    disableStacktrace: true
+    encoding: "json"
+    encoderConfig:
+        messageKey: "message"
+        levelKey: "level"
+        timeKey: "timestamp"
+        nameKey: "name"
+        callerKey: "caller"
+        functionKey: "func"
+        stacktraceKey: "stacktrace"
+        skipLineEnding: false
+        lineEnding: "\n"
+        levelEncoder: ""
+        timeEncoder: "iso8601"
+        durationEncoder: ""
+        callerEncoder: ""
+    outputPaths:
+        - "stdout"
+    errorOutputPaths:
+        - "stdout"
+    initialFields:
+        app: "minijob"

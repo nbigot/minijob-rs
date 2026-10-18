@@ -1,0 +1,98 @@
+# Configuration file for minijob server
+environment: "loadtest"
+jobs:
+    logVerbosity: 1
+    maxAllowedJobs: 0 # Maximum number of jobs allowed to be created (0 means no limit)
+    jsonSchema:
+        enable: false  # Enable JSON schema validation for job data
+    retentionPolicy:
+        enable: false
+        interval: 20
+        maxJobs: 1000
+        maxJobAge: 3600
+    retryPolicy:
+        maxRetry: 3
+        backoffStrategy:
+            base: 1
+            factor: 2
+            maxDuration: 2
+    defaultVisibilityTimeout: 30  # Default visibility timeout in seconds (30 sec)
+    maxVisibilityTimeout: 600 # Maximum visibility timeout in seconds (10 minutes)
+backend:
+    logger:
+        level: "info"
+        development: false
+        disableCaller: true
+        disableStacktrace: true
+        encoding: "json"
+        encoderConfig:
+            messageKey: "message"
+            levelKey: "level"
+            timeKey: "timestamp"
+            nameKey: "name"
+            callerKey: "caller"
+            functionKey: "func"
+            stacktraceKey: "stacktrace"
+            skipLineEnding: false
+            lineEnding: "\n"
+            levelEncoder: ""
+            timeEncoder: "iso8601"
+            durationEncoder: ""
+            callerEncoder: ""
+        outputPaths:
+            - "stdout"
+        errorOutputPaths:
+            - "stdout"
+        initialFields:
+            app: "minijob"
+            backend.provider: "inMemory"
+    logVerbosity: 3
+    type: "inMemory"
+    inMemory:
+        maxJobs: 10000000
+        enablePersistentStorage: false
+webserver:
+    cors:
+        enable: false
+        allowOrigins: "*"
+        allowHeaders: ""
+    logs:
+        enable: false
+    monitor:
+        enable: true
+    metrics:
+        enable: true
+    http:
+        enable: true
+        address: "127.0.0.1:8080"
+    swagger:
+        enable: true
+eventsLogger:
+    enable: false
+    filepath: "events.log"
+logger:
+    level: "info"
+    development: false
+    disableCaller: true
+    disableStacktrace: true
+    encoding: "json"
+    encoderConfig:
+        messageKey: "message"
+        levelKey: "level"
+        timeKey: "timestamp"
+        nameKey: "name"
+        callerKey: "caller"
+        functionKey: "func"
+        stacktraceKey: "stacktrace"
+        skipLineEnding: false
+        lineEnding: "\n"
+        levelEncoder: ""
+        timeEncoder: "iso8601"
+        durationEncoder: ""
+        callerEncoder: ""
+    outputPaths:
+        - "stdout"
+    errorOutputPaths:
+        - "stdout"
+    initialFields:
+        app: "minijob"

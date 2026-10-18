@@ -1,0 +1,1245 @@
+basePath: /
+definitions:
+  github_com_nbigot_minijob_web_apierror.APIError:
+    properties:
+      code:
+        description: application-specific error code
+        type: integer
+      details:
+        description: application-level error details that best describes the error,
+          for debugging
+        type: string
+      error:
+        description: application-level error message, for debugging
+        type: string
+      jobUUID:
+        description: job uuid
+        type: string
+      validationErrors:
+        description: list of errors
+        items:
+          $ref: '#/definitions/github_com_nbigot_minijob_web_apierror.ValidationError'
+        type: array
+    type: object
+  github_com_nbigot_minijob_web_apierror.ValidationError:
+    properties:
+      failedField:
+        type: string
+      tag:
+        type: string
+      value:
+        type: string
+    type: object
+  job.JobHistoryEvent:
+    properties:
+      eventType:
+        description: The event type (required)
+        type: string
+      timestamp:
+        description: The event timestamp (unixmilliseconds) (required)
+        type: integer
+    type: object
+  job.JobProperties:
+    additionalProperties: true
+    type: object
+  job.JobRequest:
+    properties:
+      callbackUrl:
+        description: URL to call when job completes (success or failure) (optional)
+        example: https://api.example.com/webhook
+        type: string
+      delay:
+        description: Delay (in seconds) to wait before starting the job
+        example: 0
+        type: integer
+      lockResources:
+        description: LockResources is the list of resources to lock (optional)
+        items:
+          type: string
+        type: array
+      name:
+        description: Name is the name of the job (optional)
+        example: myJobName01
+        type: string
+      priority:
+        description: Priority is the priority of the job (optional)
+        example: 0
+        type: integer
+      properties:
+        allOf:
+        - $ref: '#/definitions/job.JobProperties'
+        description: Properties is the job properties (required)
+      requester:
+        description: Requester is the identifier of the job requester (optional)
+        type: string
+      sessionId:
+        description: SessionId is the session identifier of the requester (optional)
+        example: 6e70464d-85cf-431d-a9c9-a1f9c0ac82dc
+        type: string
+      startAfter:
+        description: Timestamp (in milliseconds) to start the job after
+        type: integer
+      topic:
+        description: Topic is the topic name for which the job has been created (optional)
+        example: default
+        type: string
+      traceId:
+        description: TraceId is the trace identifier of the job (optional)
+        example: e7b46b16-c971-464e-8a47-c791be0ce2ed
+        type: string
+      userAgent:
+        description: UserAgent is the user agent (or program name) that make the request
+          (optional)
+        example: myJobProducerName
+        type: string
+    required:
+    - properties
+    type: object
+  job.JobResponse:
+    properties:
+      callbackUrl:
+        description: URL to call when job completes (success or failure) (optional)
+        type: string
+      history:
+        description: The list of events of the job
+        items:
+          $ref: '#/definitions/job.JobHistoryEvent'
+        type: array
+      id:
+        description: The unique identifier of a job (required)
+        type: string
+      lockResources:
+        description: The list of resources to lock (optional)
+        items:
+          type: string
+        type: array
+      name:
+        description: The name of the job (optional)
+        type: string
+      priority:
+        description: The priority of the job (optional)
+        type: integer
+      properties:
+        allOf:
+        - $ref: '#/definitions/job.JobProperties'
+        description: The job properties (required)
+      requester:
+        description: The identifier of the job requester (optional)
+        type: string
+      sessionId:
+        description: The session identifier of the requester (optional)
+        type: string
+      startAfter:
+        description: Timestamp (in milliseconds) to start the job after
+        type: integer
+      state:
+        description: The current state of the job (human-readable)
+        type: string
+      topic:
+        description: The topic name for which the job has been created (optional)
+        type: string
+      traceId:
+        description: The trace identifier of the job (optional)
+        type: string
+      userAgent:
+        description: The user agent (or program name) that make the request (optional)
+        type: string
+      visibilityTimeout:
+        description: Duration (in seconds) to keep the job hidden from the queue after
+          it is fetched
+        type: integer
+    type: object
+  job.LockedResources:
+    additionalProperties:
+      type: string
+    type: object
+  metrics.JobActivityMetrics:
+    properties:
+      canceled:
+        description: cumulative count of job canceled events
+        type: integer
+      created:
+        description: cumulative count of job created events
+        type: integer
+      delayed:
+        description: cumulative count of job delayed events
+        type: integer
+      deleted:
+        description: cumulative count of job deleted events
+        type: integer
+      enqueued:
+        description: cumulative count of job enqueued events
+        type: integer
+      failed:
+        description: cumulative count of job failed events
+        type: integer
+      hidden:
+        description: cumulative count of job hidden events
+        type: integer
+      pending:
+        description: cumulative count of job pending events
+        type: integer
+      started:
+        description: cumulative count of job started events
+        type: integer
+      succeeded:
+        description: cumulative count of job succeeded events
+        type: integer
+      terminated:
+        description: cumulative count of job terminated events
+        type: integer
+      timeout:
+        description: cumulative count of job timeout events
+        type: integer
+    type: object
+  metrics.JobMetrics:
+    properties:
+      jobsCounterDeleted:
+        description: total number of deleted jobs (ever)
+        type: integer
+      jobsExisting:
+        description: current number of existing jobs
+        type: integer
+      jobsStatusCanceled:
+        description: current number of canceled jobs
+        type: integer
+      jobsStatusCreated:
+        description: current number of created jobs
+        type: integer
+      jobsStatusDelayed:
+        description: current number of delayed jobs
+        type: integer
+      jobsStatusFailed:
+        description: current number of failed jobs
+        type: integer
+      jobsStatusHidden:
+        description: current number of hidden jobs
+        type: integer
+      jobsStatusPending:
+        description: current number of pending jobs
+        type: integer
+      jobsStatusQueued:
+        description: current number of queued jobs
+        type: integer
+      jobsStatusRunning:
+        description: current number of running jobs
+        type: integer
+      jobsStatusSucceeded:
+        description: current number of succeeded jobs
+        type: integer
+      resourcesLockedCount:
+        description: current number of locked resources
+        type: integer
+    type: object
+  metrics.JobMetricsTopicMap:
+    additionalProperties:
+      items:
+        $ref: '#/definitions/metrics.JobMetrics'
+      type: array
+    type: object
+  metrics.JobStatsMetrics:
+    properties:
+      canceledJobs:
+        description: number of canceled jobs
+        type: integer
+      createdJobs:
+        description: total number of jobs
+        type: integer
+      delayedJobs:
+        description: number of delayed jobs
+        type: integer
+      deletedJobs:
+        description: number of deleted jobs
+        type: integer
+      existingJobs:
+        description: current number of existing jobs
+        type: integer
+      failedJobs:
+        description: number of failed jobs
+        type: integer
+      hiddenJobs:
+        description: number of hidden jobs
+        type: integer
+      pendingJobs:
+        description: number of pending jobs
+        type: integer
+      queuedJobs:
+        description: number of queued jobs
+        type: integer
+      runningJobs:
+        description: number of running jobs
+        type: integer
+      succeededJobs:
+        description: number of succeeded jobs
+        type: integer
+    type: object
+  metrics.ResourceMetrics:
+    properties:
+      jobUuid:
+        description: UUID of the job that locked the resource
+        type: string
+      lockDuration:
+        description: lock duration in seconds
+        type: integer
+      resourceName:
+        description: name of the resource
+        type: string
+      startTime:
+        description: begin time when the resource was locked in seconds
+        type: integer
+      topic:
+        description: topic of the job that locked the resource
+        type: string
+    type: object
+  metrics.TopicMetrics:
+    properties:
+      activeJobs:
+        description: number of active jobs in the topic
+        type: integer
+      averageDuration:
+        description: average duration of jobs in the topic (in seconds)
+        type: number
+      percentJobs:
+        description: percentage of jobs in the topic (0.0 - 100.0)
+        type: number
+      successRate:
+        description: success rate of jobs in the topic (0.0 - 1.0)
+        type: number
+      topicName:
+        description: name of the topic
+        type: string
+      totalJobs:
+        description: total number of jobs in the topic
+        type: integer
+    type: object
+  web.JSONResult:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      data:
+        description: The result data
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultCloneJob:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      job:
+        allOf:
+        - $ref: '#/definitions/job.JobResponse'
+        description: The job
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultCreateJob:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      job:
+        allOf:
+        - $ref: '#/definitions/job.JobResponse'
+        description: The job
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultGetAllJobs:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      jobs:
+        description: The jobs
+        items:
+          $ref: '#/definitions/job.JobResponse'
+        type: array
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultGetJob:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      job:
+        allOf:
+        - $ref: '#/definitions/job.JobResponse'
+        description: The job
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultGetJobs:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      jobs:
+        description: The jobs
+        items:
+          $ref: '#/definitions/job.JobResponse'
+        type: array
+      limit:
+        description: The page limit
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+      page:
+        description: The current page
+        type: integer
+      total:
+        description: The total number of jobs
+        type: integer
+      totalpages:
+        description: The total number of pages
+        type: integer
+    type: object
+  web.JSONResultGetJobsCumulativeEventCount:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      jobActivity:
+        allOf:
+        - $ref: '#/definitions/metrics.JobActivityMetrics'
+        description: The job activity metrics (cumulative event counts)
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultGetJobsMetrics:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      jobStats:
+        allOf:
+        - $ref: '#/definitions/metrics.JobStatsMetrics'
+        description: The metrics
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultGetJobsMetricsTopics:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+      metrics:
+        allOf:
+        - $ref: '#/definitions/metrics.JobMetricsTopicMap'
+        description: The metrics
+    type: object
+  web.JSONResultGetLockedResources:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+      resources:
+        allOf:
+        - $ref: '#/definitions/job.LockedResources'
+        description: The locked resources
+    type: object
+  web.JSONResultGetOldJobs:
+    properties:
+      code:
+        description: The result code
+        type: integer
+      message:
+        description: The result message
+        type: string
+      topics:
+        allOf:
+        - $ref: '#/definitions/web.TopicOldJobsMap'
+        description: The oldest jobs by topic
+    type: object
+  web.JSONResultGetResourcesStats:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+      resources:
+        description: The job resources with metrics
+        items:
+          $ref: '#/definitions/metrics.ResourceMetrics'
+        type: array
+    type: object
+  web.JSONResultGetSystemInfo:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+      systemInfo:
+        properties:
+          environment:
+            type: string
+          hostname:
+            type: string
+          uptime:
+            type: integer
+          version:
+            type: string
+        type: object
+    type: object
+  web.JSONResultGetSystemResources:
+    properties:
+      code:
+        example: 200
+        type: integer
+      message:
+        example: success
+        type: string
+      resourceUsage:
+        $ref: '#/definitions/web.ResourceUsage'
+    type: object
+  web.JSONResultGetTopics:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+      topics:
+        description: The job topics
+        items:
+          type: string
+        type: array
+    type: object
+  web.JSONResultGetTopicsStats:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+      topics:
+        description: The job topics with metrics
+        items:
+          $ref: '#/definitions/metrics.TopicMetrics'
+        type: array
+    type: object
+  web.JSONResultJobDurationList:
+    properties:
+      code:
+        description: The result code
+        type: integer
+      jobs:
+        description: The jobs
+        items:
+          $ref: '#/definitions/web.JobDurationResult'
+        type: array
+      message:
+        description: The result message
+        type: string
+    type: object
+  web.JSONResultPullJob:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      jobs:
+        description: The jobs
+        items:
+          $ref: '#/definitions/job.JobResponse'
+        type: array
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JSONResultSuccess:
+    properties:
+      code:
+        description: The result code
+        example: 200
+        type: integer
+      message:
+        description: The result message
+        example: success
+        type: string
+    type: object
+  web.JobDurationResult:
+    properties:
+      created:
+        description: The job creation timestamp in milliseconds
+        type: integer
+      duration:
+        description: The job duration in milliseconds
+        type: integer
+      id:
+        description: The job UUID
+        type: string
+      state:
+        description: The job state
+        type: string
+      topic:
+        description: The job topic
+        type: string
+    type: object
+  web.ResourceBackendProvider:
+    properties:
+      label:
+        type: string
+      value:
+        type: string
+    type: object
+  web.ResourceMetric:
+    properties:
+      label:
+        type: string
+      value:
+        type: string
+    type: object
+  web.ResourceUsage:
+    properties:
+      backend:
+        $ref: '#/definitions/web.ResourceBackendProvider'
+      disk:
+        $ref: '#/definitions/web.ResourceMetric'
+      memory:
+        $ref: '#/definitions/web.ResourceMetric'
+    type: object
+  web.TopOldJobsResult:
+    properties:
+      duration:
+        description: The job duration in milliseconds
+        type: integer
+      jobuuid:
+        description: The job UUID
+        type: string
+    type: object
+  web.TopicOldJobsMap:
+    additionalProperties:
+      items:
+        $ref: '#/definitions/web.TopOldJobsResult'
+      type: array
+    type: object
+host: 127.0.0.1:8080
+info:
+  contact: {}
+  description: This documentation describes MiniJob API
+  license:
+    name: MIT
+    url: https://github.com/nbigot/minijob/blob/main/LICENSE
+  title: MiniJob API
+  version: "1.0"
+paths:
+  /:
+    get:
+      description: Home page
+      operationId: utils-home
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: Welcome to MiniJob!
+          schema:
+            type: string
+      summary: Home page
+      tags:
+      - Utils
+  /api/v1/admin/server/restart:
+    post:
+      consumes:
+      - application/json
+      description: Restart server
+      operationId: server-restart
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Restart server
+      tags:
+      - Admin
+  /api/v1/admin/server/shutdown:
+    post:
+      consumes:
+      - application/json
+      description: Shutdown server
+      operationId: server-shutdown
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Shutdown server
+      tags:
+      - Admin
+  /api/v1/job/:
+    post:
+      consumes:
+      - application/json
+      description: Create job
+      operationId: job-create
+      parameters:
+      - description: Job creation request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/job.JobRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultCreateJob'
+        "400":
+          description: Invalid input - content type, JSON body format or validation
+            errors
+          schema:
+            $ref: '#/definitions/github_com_nbigot_minijob_web_apierror.APIError'
+      summary: Create job
+      tags:
+      - Jobs
+  /api/v1/job/{jobuuid}:
+    delete:
+      description: Delete job
+      operationId: job-delete
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Delete job
+      tags:
+      - Jobs
+    get:
+      description: Get a job
+      operationId: job-get
+      parameters:
+      - description: Job UUID
+        in: path
+        name: jobuuid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetJob'
+        "400":
+          description: Invalid UUID
+          schema:
+            $ref: '#/definitions/github_com_nbigot_minijob_web_apierror.APIError'
+        "404":
+          description: Job not found
+          schema:
+            $ref: '#/definitions/github_com_nbigot_minijob_web_apierror.APIError'
+        "500":
+          description: Invalid job
+          schema:
+            $ref: '#/definitions/github_com_nbigot_minijob_web_apierror.APIError'
+      summary: Get a job
+      tags:
+      - Jobs
+  /api/v1/job/{jobuuid}/cancel:
+    post:
+      description: Cancel a job that is running
+      operationId: job-cancel
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Cancel a running job
+      tags:
+      - Jobs
+  /api/v1/job/{jobuuid}/clone:
+    post:
+      description: Clone job
+      operationId: job-clone
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultCloneJob'
+      summary: Clone job
+      tags:
+      - Jobs
+  /api/v1/job/{jobuuid}/fail:
+    post:
+      description: Set job as failed
+      operationId: job-set-as-failed
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Set job as failed
+      tags:
+      - Jobs
+  /api/v1/job/{jobuuid}/succeed:
+    post:
+      description: Set job as successful
+      operationId: job-set-as-successful
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Set job as successful
+      tags:
+      - Jobs
+  /api/v1/job/{jobuuid}/visibilitytimeout:
+    post:
+      description: Change job visibility timeout
+      operationId: job-change-visibility-timeout
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Change job visibility timeout
+      tags:
+      - Jobs
+  /api/v1/job/pull:
+    post:
+      description: Pull one or multiple jobs
+      operationId: job-pull
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultPullJob'
+      summary: Pull one or multiple jobs
+      tags:
+      - Jobs
+  /api/v1/jobs:
+    get:
+      description: Get jobs with optional filtering by status/topic, pagination, and
+        sorting
+      operationId: jobs-get-filtered
+      parameters:
+      - description: Page number (default 1, min 1)
+        in: query
+        name: page
+        type: integer
+      - description: Number of jobs per page (default 10, min 1, max 1000)
+        in: query
+        name: limit
+        type: integer
+      - description: Filter by job status (created, delayed, pending, queued, running,
+          succeeded, failed, canceled, deleted, hidden)
+        in: query
+        name: status
+        type: string
+      - description: Filter by topic
+        in: query
+        name: topic
+        type: string
+      - description: Sort criteria, comma-separated (created_asc, created_desc, priority_asc,
+          priority_desc, updated_asc, updated_desc, topic_asc, topic_desc)
+        in: query
+        name: sort
+        type: string
+      - description: Search by job ID (partial match)
+        in: query
+        name: search
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetJobs'
+      summary: Get jobs with filtering, pagination and sorting
+      tags:
+      - Jobs
+  /api/v1/jobs/:
+    delete:
+      description: Delete all jobs
+      operationId: jobs-delete-all
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Delete all jobs
+      tags:
+      - Jobs
+  /api/v1/jobs/all:
+    get:
+      description: Get all jobs
+      operationId: jobs-get-all
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetAllJobs'
+      summary: Get all jobs
+      tags:
+      - Jobs
+  /api/v1/jobs/old:
+    get:
+      description: Get top N oldest jobs that are not completed, grouped by topic
+      operationId: jobs-get-old
+      parameters:
+      - description: Number of jobs per topic (default 10, min 1, max 100)
+        in: query
+        name: limit
+        type: integer
+      - description: Minimum job duration in seconds (default 0, max 1 year)
+        in: query
+        name: duration
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetOldJobs'
+      summary: Get oldest incomplete jobs
+      tags:
+      - Jobs
+  /api/v1/jobs/queued:
+    delete:
+      description: Delete queued jobs
+      operationId: jobs-delete-queued
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Delete queued jobs
+      tags:
+      - Jobs
+  /api/v1/jobs/recent:
+    get:
+      description: Get jobs that have been running or queued for a short time
+      operationId: jobs-get-recent
+      parameters:
+      - description: Maximum job duration in minutes to consider recent (default 10,
+          min 1, max 10080)
+        in: query
+        name: duration
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultJobDurationList'
+      summary: Get recently started jobs
+      tags:
+      - Jobs
+  /api/v1/jobs/stalled:
+    get:
+      description: Get jobs that have been running or queued for an unusually long
+        time
+      operationId: jobs-get-stalled
+      parameters:
+      - description: Minimum job duration in minutes to consider stalled (default
+          60, min 1, max 10080)
+        in: query
+        name: duration
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultJobDurationList'
+      summary: Get stalled jobs
+      tags:
+      - Jobs
+  /api/v1/metrics/jobs/activity:
+    get:
+      description: Get cumulative event counts for all job event types (Job Activity
+        Metrics)
+      operationId: jobs-activity-stats
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetJobsCumulativeEventCount'
+      summary: Get job activity metrics
+      tags:
+      - Utils
+  /api/v1/metrics/jobs/processing:
+    get:
+      description: Get current job counts and statistics grouped by job status (running,
+        queued, succeeded, failed, etc.)
+      operationId: jobs-metrics
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetJobsMetrics'
+      summary: Get job processing metrics by status
+      tags:
+      - Utils
+  /api/v1/metrics/jobs/topics:
+    get:
+      description: Get jobs metrics topics
+      operationId: jobs-metrics-topics
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetJobsMetricsTopics'
+      summary: Get jobs metrics topics
+      tags:
+      - Utils
+  /api/v1/metrics/resources:
+    get:
+      description: Get resources stats
+      operationId: resources-stats
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetResourcesStats'
+      summary: Get resources stats
+      tags:
+      - Resources
+  /api/v1/metrics/topics:
+    get:
+      description: Get topics stats
+      operationId: topics-stats
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetTopicsStats'
+      summary: Get topics stats
+      tags:
+      - Topics
+  /api/v1/resource/{resourceName}/unlock:
+    post:
+      description: Unlock a single resource
+      operationId: resource-unlock
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+        "404":
+          description: resource not found
+          schema:
+            $ref: '#/definitions/web.JSONResult'
+      summary: Unlock a single resource
+      tags:
+      - Resources
+  /api/v1/resources:
+    get:
+      description: Get locked Resources
+      operationId: resources-get-locked
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetLockedResources'
+      summary: Get locked Resources
+      tags:
+      - Resources
+  /api/v1/resources/unlock:
+    post:
+      description: Unlock all resources
+      operationId: resources-unlock-all
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultSuccess'
+      summary: Unlock all resources
+      tags:
+      - Resources
+  /api/v1/system/health:
+    get:
+      description: Get system health status and basic diagnostics
+      operationId: system-get-health
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: ok
+          schema:
+            type: string
+      summary: Get system health status
+      tags:
+      - System
+  /api/v1/system/info:
+    get:
+      description: Get system information including version, uptime, and runtime details
+      operationId: system-get-info
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetSystemInfo'
+      summary: Get system information
+      tags:
+      - System
+  /api/v1/system/resources:
+    get:
+      description: Get system resource usage including memory and CPU statistics
+      operationId: system-get-resources
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetSystemResources'
+      summary: Get system resource usage
+      tags:
+      - System
+  /api/v1/topics:
+    get:
+      description: Get jobs topics
+      operationId: jobs-topics
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: successful operation
+          schema:
+            $ref: '#/definitions/web.JSONResultGetTopics'
+      summary: Get jobs topics
+      tags:
+      - Topics
+  /healthcheck:
+    get:
+      description: Healthcheck server
+      operationId: utils-healthcheck
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Healthcheck server
+      tags:
+      - Utils
+  /metrics:
+    get:
+      description: get server metrics
+      operationId: utils-metrics-get
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: ok
+          schema:
+            type: string
+      summary: get server metrics
+      tags:
+      - Utils
+  /ping:
+    get:
+      description: Ping server
+      operationId: utils-ping
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Ping server
+      tags:
+      - Utils
+swagger: "2.0"

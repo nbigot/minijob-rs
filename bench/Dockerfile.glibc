@@ -1,0 +1,28 @@
+# Server image built against glibc (Debian 13) instead of musl, to compare the two:
+# docker build -t minijob:glibc -f bench/Dockerfile.glibc .
+# Same layout, port, command and health check as the main Dockerfile.
+
+FROM rust:1.97 AS build
+ARG PROGRAM_VERSION=v1.0.0
+ARG FEATURES=""
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY assets ./assets
+COPY docs ./docs
+COPY bench ./bench
+ENV MINIJOB_VERSION=${PROGRAM_VERSION}
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target,id=minijob-target-glibc \
+    cargo build --release --locked --features "$FEATURES" && cp target/release/minijob /minijob
+
+FROM debian:13-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /minijob /app/minijob
+COPY config-templates/docker/config /app/config
+EXPOSE 8080/tcp
+HEALTHCHECK CMD curl -f http://localhost:8080/livez || exit 1
+CMD ["/app/minijob", "-config", "/app/config/config.yaml"]

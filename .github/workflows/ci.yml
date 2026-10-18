@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "--no-default-features", "--all-features"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy${{ matrix.features }}
+      - run: cargo clippy --locked --workspace --all-targets ${{ matrix.features }} -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      MINIJOB_TEST_REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --workspace
+      - run: cargo test --locked --no-default-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --locked --workspace --all-targets --all-features
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build image
+        run: docker build -t minijob:ci .
+      - name: Health check
+        run: |
+          docker run -d --name minijob -p 8080:8080 minijob:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' minijob)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          docker logs minijob
+          [ "$(docker inspect --format '{{.State.Health.Status}}' minijob)" = healthy ]
+          curl -fsS localhost:8080/api/v1/system/info
+          docker stop minijob
+          [ "$(docker inspect --format '{{.State.ExitCode}}' minijob)" = 0 ]

@@ -1,0 +1,29 @@
+{
+  "topic": "topic 1",
+  "properties": {
+    "key1": "value1",
+    "key2": 42,
+    "key3": [
+      1,
+      2,
+      3
+    ],
+    "key4": {
+      "a": 1,
+      "b": [],
+      "c": {
+        "x": "value1",
+        "y": 42
+      }
+    }
+  },
+  "lockResources": [
+    "resource1",
+    "resource2",
+    "resource3:abc:def"
+  ],
+  "userAgent": "user agent test",
+  "requester": "unit-test",
+  "sessionId": "0190e951-c29a-70aa-ba59-18be4abe97a1",
+  "traceId": "0190e951-c29a-70aa-ba59-18be4abe97a0"
+}

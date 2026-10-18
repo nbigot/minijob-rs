@@ -1,0 +1,1802 @@
+{
+    "schemes": [],
+    "swagger": "2.0",
+    "info": {
+        "description": "This documentation describes MiniJob API",
+        "title": "MiniJob API",
+        "contact": {},
+        "license": {
+            "name": "MIT",
+            "url": "https://github.com/nbigot/minijob/blob/main/LICENSE"
+        },
+        "version": "1.0"
+    },
+    "host": "127.0.0.1:8080",
+    "basePath": "/",
+    "paths": {
+        "/": {
+            "get": {
+                "description": "Home page",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Utils"
+                ],
+                "summary": "Home page",
+                "operationId": "utils-home",
+                "responses": {
+                    "200": {
+                        "description": "Welcome to MiniJob!",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/server/restart": {
+            "post": {
+                "description": "Restart server",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "Restart server",
+                "operationId": "server-restart",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/server/shutdown": {
+            "post": {
+                "description": "Shutdown server",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "Shutdown server",
+                "operationId": "server-shutdown",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/": {
+            "post": {
+                "description": "Create job",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Create job",
+                "operationId": "job-create",
+                "parameters": [
+                    {
+                        "description": "Job creation request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/job.JobRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultCreateJob"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid input - content type, JSON body format or validation errors",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_nbigot_minijob_web_apierror.APIError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/pull": {
+            "post": {
+                "description": "Pull one or multiple jobs",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Pull one or multiple jobs",
+                "operationId": "job-pull",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultPullJob"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/{jobuuid}": {
+            "get": {
+                "description": "Get a job",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Get a job",
+                "operationId": "job-get",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Job UUID",
+                        "name": "jobuuid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetJob"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid UUID",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_nbigot_minijob_web_apierror.APIError"
+                        }
+                    },
+                    "404": {
+                        "description": "Job not found",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_nbigot_minijob_web_apierror.APIError"
+                        }
+                    },
+                    "500": {
+                        "description": "Invalid job",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_nbigot_minijob_web_apierror.APIError"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Delete job",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Delete job",
+                "operationId": "job-delete",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/{jobuuid}/cancel": {
+            "post": {
+                "description": "Cancel a job that is running",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Cancel a running job",
+                "operationId": "job-cancel",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/{jobuuid}/clone": {
+            "post": {
+                "description": "Clone job",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Clone job",
+                "operationId": "job-clone",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultCloneJob"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/{jobuuid}/fail": {
+            "post": {
+                "description": "Set job as failed",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Set job as failed",
+                "operationId": "job-set-as-failed",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/{jobuuid}/succeed": {
+            "post": {
+                "description": "Set job as successful",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Set job as successful",
+                "operationId": "job-set-as-successful",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/job/{jobuuid}/visibilitytimeout": {
+            "post": {
+                "description": "Change job visibility timeout",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Change job visibility timeout",
+                "operationId": "job-change-visibility-timeout",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/jobs": {
+            "get": {
+                "description": "Get jobs with optional filtering by status/topic, pagination, and sorting",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Get jobs with filtering, pagination and sorting",
+                "operationId": "jobs-get-filtered",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Page number (default 1, min 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of jobs per page (default 10, min 1, max 1000)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by job status (created, delayed, pending, queued, running, succeeded, failed, canceled, deleted, hidden)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by topic",
+                        "name": "topic",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Sort criteria, comma-separated (created_asc, created_desc, priority_asc, priority_desc, updated_asc, updated_desc, topic_asc, topic_desc)",
+                        "name": "sort",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search by job ID (partial match)",
+                        "name": "search",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetJobs"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/jobs/": {
+            "delete": {
+                "description": "Delete all jobs",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Delete all jobs",
+                "operationId": "jobs-delete-all",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/jobs/all": {
+            "get": {
+                "description": "Get all jobs",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Get all jobs",
+                "operationId": "jobs-get-all",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetAllJobs"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/jobs/old": {
+            "get": {
+                "description": "Get top N oldest jobs that are not completed, grouped by topic",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Get oldest incomplete jobs",
+                "operationId": "jobs-get-old",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Number of jobs per topic (default 10, min 1, max 100)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Minimum job duration in seconds (default 0, max 1 year)",
+                        "name": "duration",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetOldJobs"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/jobs/queued": {
+            "delete": {
+                "description": "Delete queued jobs",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Delete queued jobs",
+                "operationId": "jobs-delete-queued",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/jobs/recent": {
+            "get": {
+                "description": "Get jobs that have been running or queued for a short time",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Get recently started jobs",
+                "operationId": "jobs-get-recent",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Maximum job duration in minutes to consider recent (default 10, min 1, max 10080)",
+                        "name": "duration",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultJobDurationList"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/jobs/stalled": {
+            "get": {
+                "description": "Get jobs that have been running or queued for an unusually long time",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Jobs"
+                ],
+                "summary": "Get stalled jobs",
+                "operationId": "jobs-get-stalled",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Minimum job duration in minutes to consider stalled (default 60, min 1, max 10080)",
+                        "name": "duration",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultJobDurationList"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/metrics/jobs/activity": {
+            "get": {
+                "description": "Get cumulative event counts for all job event types (Job Activity Metrics)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Utils"
+                ],
+                "summary": "Get job activity metrics",
+                "operationId": "jobs-activity-stats",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetJobsCumulativeEventCount"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/metrics/jobs/processing": {
+            "get": {
+                "description": "Get current job counts and statistics grouped by job status (running, queued, succeeded, failed, etc.)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Utils"
+                ],
+                "summary": "Get job processing metrics by status",
+                "operationId": "jobs-metrics",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetJobsMetrics"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/metrics/jobs/topics": {
+            "get": {
+                "description": "Get jobs metrics topics",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Utils"
+                ],
+                "summary": "Get jobs metrics topics",
+                "operationId": "jobs-metrics-topics",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetJobsMetricsTopics"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/metrics/resources": {
+            "get": {
+                "description": "Get resources stats",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Resources"
+                ],
+                "summary": "Get resources stats",
+                "operationId": "resources-stats",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetResourcesStats"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/metrics/topics": {
+            "get": {
+                "description": "Get topics stats",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Topics"
+                ],
+                "summary": "Get topics stats",
+                "operationId": "topics-stats",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetTopicsStats"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/resource/{resourceName}/unlock": {
+            "post": {
+                "description": "Unlock a single resource",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Resources"
+                ],
+                "summary": "Unlock a single resource",
+                "operationId": "resource-unlock",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    },
+                    "404": {
+                        "description": "resource not found",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResult"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/resources": {
+            "get": {
+                "description": "Get locked Resources",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Resources"
+                ],
+                "summary": "Get locked Resources",
+                "operationId": "resources-get-locked",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetLockedResources"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/resources/unlock": {
+            "post": {
+                "description": "Unlock all resources",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Resources"
+                ],
+                "summary": "Unlock all resources",
+                "operationId": "resources-unlock-all",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultSuccess"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/system/health": {
+            "get": {
+                "description": "Get system health status and basic diagnostics",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Get system health status",
+                "operationId": "system-get-health",
+                "responses": {
+                    "200": {
+                        "description": "ok",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/system/info": {
+            "get": {
+                "description": "Get system information including version, uptime, and runtime details",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Get system information",
+                "operationId": "system-get-info",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetSystemInfo"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/system/resources": {
+            "get": {
+                "description": "Get system resource usage including memory and CPU statistics",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "System"
+                ],
+                "summary": "Get system resource usage",
+                "operationId": "system-get-resources",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetSystemResources"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/topics": {
+            "get": {
+                "description": "Get jobs topics",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Topics"
+                ],
+                "summary": "Get jobs topics",
+                "operationId": "jobs-topics",
+                "responses": {
+                    "200": {
+                        "description": "successful operation",
+                        "schema": {
+                            "$ref": "#/definitions/web.JSONResultGetTopics"
+                        }
+                    }
+                }
+            }
+        },
+        "/healthcheck": {
+            "get": {
+                "description": "Healthcheck server",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Utils"
+                ],
+                "summary": "Healthcheck server",
+                "operationId": "utils-healthcheck",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/metrics": {
+            "get": {
+                "description": "get server metrics",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Utils"
+                ],
+                "summary": "get server metrics",
+                "operationId": "utils-metrics-get",
+                "responses": {
+                    "200": {
+                        "description": "ok",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/ping": {
+            "get": {
+                "description": "Ping server",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Utils"
+                ],
+                "summary": "Ping server",
+                "operationId": "utils-ping",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "github_com_nbigot_minijob_web_apierror.APIError": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "application-specific error code",
+                    "type": "integer"
+                },
+                "details": {
+                    "description": "application-level error details that best describes the error, for debugging",
+                    "type": "string"
+                },
+                "error": {
+                    "description": "application-level error message, for debugging",
+                    "type": "string"
+                },
+                "jobUUID": {
+                    "description": "job uuid",
+                    "type": "string"
+                },
+                "validationErrors": {
+                    "description": "list of errors",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_nbigot_minijob_web_apierror.ValidationError"
+                    }
+                }
+            }
+        },
+        "github_com_nbigot_minijob_web_apierror.ValidationError": {
+            "type": "object",
+            "properties": {
+                "failedField": {
+                    "type": "string"
+                },
+                "tag": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                }
+            }
+        },
+        "job.JobHistoryEvent": {
+            "type": "object",
+            "properties": {
+                "eventType": {
+                    "description": "The event type (required)",
+                    "type": "string"
+                },
+                "timestamp": {
+                    "description": "The event timestamp (unixmilliseconds) (required)",
+                    "type": "integer"
+                }
+            }
+        },
+        "job.JobProperties": {
+            "type": "object",
+            "additionalProperties": true
+        },
+        "job.JobRequest": {
+            "type": "object",
+            "required": [
+                "properties"
+            ],
+            "properties": {
+                "callbackUrl": {
+                    "description": "URL to call when job completes (success or failure) (optional)",
+                    "type": "string",
+                    "example": "https://api.example.com/webhook"
+                },
+                "delay": {
+                    "description": "Delay (in seconds) to wait before starting the job",
+                    "type": "integer",
+                    "example": 0
+                },
+                "lockResources": {
+                    "description": "LockResources is the list of resources to lock (optional)",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "name": {
+                    "description": "Name is the name of the job (optional)",
+                    "type": "string",
+                    "example": "myJobName01"
+                },
+                "priority": {
+                    "description": "Priority is the priority of the job (optional)",
+                    "type": "integer",
+                    "example": 0
+                },
+                "properties": {
+                    "description": "Properties is the job properties (required)",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/job.JobProperties"
+                        }
+                    ]
+                },
+                "requester": {
+                    "description": "Requester is the identifier of the job requester (optional)",
+                    "type": "string"
+                },
+                "sessionId": {
+                    "description": "SessionId is the session identifier of the requester (optional)",
+                    "type": "string",
+                    "example": "6e70464d-85cf-431d-a9c9-a1f9c0ac82dc"
+                },
+                "startAfter": {
+                    "description": "Timestamp (in milliseconds) to start the job after",
+                    "type": "integer"
+                },
+                "topic": {
+                    "description": "Topic is the topic name for which the job has been created (optional)",
+                    "type": "string",
+                    "example": "default"
+                },
+                "traceId": {
+                    "description": "TraceId is the trace identifier of the job (optional)",
+                    "type": "string",
+                    "example": "e7b46b16-c971-464e-8a47-c791be0ce2ed"
+                },
+                "userAgent": {
+                    "description": "UserAgent is the user agent (or program name) that make the request (optional)",
+                    "type": "string",
+                    "example": "myJobProducerName"
+                }
+            }
+        },
+        "job.JobResponse": {
+            "type": "object",
+            "properties": {
+                "callbackUrl": {
+                    "description": "URL to call when job completes (success or failure) (optional)",
+                    "type": "string"
+                },
+                "history": {
+                    "description": "The list of events of the job",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/job.JobHistoryEvent"
+                    }
+                },
+                "id": {
+                    "description": "The unique identifier of a job (required)",
+                    "type": "string"
+                },
+                "lockResources": {
+                    "description": "The list of resources to lock (optional)",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "name": {
+                    "description": "The name of the job (optional)",
+                    "type": "string"
+                },
+                "priority": {
+                    "description": "The priority of the job (optional)",
+                    "type": "integer"
+                },
+                "properties": {
+                    "description": "The job properties (required)",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/job.JobProperties"
+                        }
+                    ]
+                },
+                "requester": {
+                    "description": "The identifier of the job requester (optional)",
+                    "type": "string"
+                },
+                "sessionId": {
+                    "description": "The session identifier of the requester (optional)",
+                    "type": "string"
+                },
+                "startAfter": {
+                    "description": "Timestamp (in milliseconds) to start the job after",
+                    "type": "integer"
+                },
+                "state": {
+                    "description": "The current state of the job (human-readable)",
+                    "type": "string"
+                },
+                "topic": {
+                    "description": "The topic name for which the job has been created (optional)",
+                    "type": "string"
+                },
+                "traceId": {
+                    "description": "The trace identifier of the job (optional)",
+                    "type": "string"
+                },
+                "userAgent": {
+                    "description": "The user agent (or program name) that make the request (optional)",
+                    "type": "string"
+                },
+                "visibilityTimeout": {
+                    "description": "Duration (in seconds) to keep the job hidden from the queue after it is fetched",
+                    "type": "integer"
+                }
+            }
+        },
+        "job.LockedResources": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "string"
+            }
+        },
+        "metrics.JobActivityMetrics": {
+            "type": "object",
+            "properties": {
+                "canceled": {
+                    "description": "cumulative count of job canceled events",
+                    "type": "integer"
+                },
+                "created": {
+                    "description": "cumulative count of job created events",
+                    "type": "integer"
+                },
+                "delayed": {
+                    "description": "cumulative count of job delayed events",
+                    "type": "integer"
+                },
+                "deleted": {
+                    "description": "cumulative count of job deleted events",
+                    "type": "integer"
+                },
+                "enqueued": {
+                    "description": "cumulative count of job enqueued events",
+                    "type": "integer"
+                },
+                "failed": {
+                    "description": "cumulative count of job failed events",
+                    "type": "integer"
+                },
+                "hidden": {
+                    "description": "cumulative count of job hidden events",
+                    "type": "integer"
+                },
+                "pending": {
+                    "description": "cumulative count of job pending events",
+                    "type": "integer"
+                },
+                "started": {
+                    "description": "cumulative count of job started events",
+                    "type": "integer"
+                },
+                "succeeded": {
+                    "description": "cumulative count of job succeeded events",
+                    "type": "integer"
+                },
+                "terminated": {
+                    "description": "cumulative count of job terminated events",
+                    "type": "integer"
+                },
+                "timeout": {
+                    "description": "cumulative count of job timeout events",
+                    "type": "integer"
+                }
+            }
+        },
+        "metrics.JobMetrics": {
+            "type": "object",
+            "properties": {
+                "jobsCounterDeleted": {
+                    "description": "total number of deleted jobs (ever)",
+                    "type": "integer"
+                },
+                "jobsExisting": {
+                    "description": "current number of existing jobs",
+                    "type": "integer"
+                },
+                "jobsStatusCanceled": {
+                    "description": "current number of canceled jobs",
+                    "type": "integer"
+                },
+                "jobsStatusCreated": {
+                    "description": "current number of created jobs",
+                    "type": "integer"
+                },
+                "jobsStatusDelayed": {
+                    "description": "current number of delayed jobs",
+                    "type": "integer"
+                },
+                "jobsStatusFailed": {
+                    "description": "current number of failed jobs",
+                    "type": "integer"
+                },
+                "jobsStatusHidden": {
+                    "description": "current number of hidden jobs",
+                    "type": "integer"
+                },
+                "jobsStatusPending": {
+                    "description": "current number of pending jobs",
+                    "type": "integer"
+                },
+                "jobsStatusQueued": {
+                    "description": "current number of queued jobs",
+                    "type": "integer"
+                },
+                "jobsStatusRunning": {
+                    "description": "current number of running jobs",
+                    "type": "integer"
+                },
+                "jobsStatusSucceeded": {
+                    "description": "current number of succeeded jobs",
+                    "type": "integer"
+                },
+                "resourcesLockedCount": {
+                    "description": "current number of locked resources",
+                    "type": "integer"
+                }
+            }
+        },
+        "metrics.JobMetricsTopicMap": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {
+                    "$ref": "#/definitions/metrics.JobMetrics"
+                }
+            }
+        },
+        "metrics.JobStatsMetrics": {
+            "type": "object",
+            "properties": {
+                "canceledJobs": {
+                    "description": "number of canceled jobs",
+                    "type": "integer"
+                },
+                "createdJobs": {
+                    "description": "total number of jobs",
+                    "type": "integer"
+                },
+                "delayedJobs": {
+                    "description": "number of delayed jobs",
+                    "type": "integer"
+                },
+                "deletedJobs": {
+                    "description": "number of deleted jobs",
+                    "type": "integer"
+                },
+                "existingJobs": {
+                    "description": "current number of existing jobs",
+                    "type": "integer"
+                },
+                "failedJobs": {
+                    "description": "number of failed jobs",
+                    "type": "integer"
+                },
+                "hiddenJobs": {
+                    "description": "number of hidden jobs",
+                    "type": "integer"
+                },
+                "pendingJobs": {
+                    "description": "number of pending jobs",
+                    "type": "integer"
+                },
+                "queuedJobs": {
+                    "description": "number of queued jobs",
+                    "type": "integer"
+                },
+                "runningJobs": {
+                    "description": "number of running jobs",
+                    "type": "integer"
+                },
+                "succeededJobs": {
+                    "description": "number of succeeded jobs",
+                    "type": "integer"
+                }
+            }
+        },
+        "metrics.ResourceMetrics": {
+            "type": "object",
+            "properties": {
+                "jobUuid": {
+                    "description": "UUID of the job that locked the resource",
+                    "type": "string"
+                },
+                "lockDuration": {
+                    "description": "lock duration in seconds",
+                    "type": "integer"
+                },
+                "resourceName": {
+                    "description": "name of the resource",
+                    "type": "string"
+                },
+                "startTime": {
+                    "description": "begin time when the resource was locked in seconds",
+                    "type": "integer"
+                },
+                "topic": {
+                    "description": "topic of the job that locked the resource",
+                    "type": "string"
+                }
+            }
+        },
+        "metrics.TopicMetrics": {
+            "type": "object",
+            "properties": {
+                "activeJobs": {
+                    "description": "number of active jobs in the topic",
+                    "type": "integer"
+                },
+                "averageDuration": {
+                    "description": "average duration of jobs in the topic (in seconds)",
+                    "type": "number"
+                },
+                "percentJobs": {
+                    "description": "percentage of jobs in the topic (0.0 - 100.0)",
+                    "type": "number"
+                },
+                "successRate": {
+                    "description": "success rate of jobs in the topic (0.0 - 1.0)",
+                    "type": "number"
+                },
+                "topicName": {
+                    "description": "name of the topic",
+                    "type": "string"
+                },
+                "totalJobs": {
+                    "description": "total number of jobs in the topic",
+                    "type": "integer"
+                }
+            }
+        },
+        "web.JSONResult": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "data": {
+                    "description": "The result data"
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultCloneJob": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "job": {
+                    "description": "The job",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/job.JobResponse"
+                        }
+                    ]
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultCreateJob": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "job": {
+                    "description": "The job",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/job.JobResponse"
+                        }
+                    ]
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultGetAllJobs": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "jobs": {
+                    "description": "The jobs",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/job.JobResponse"
+                    }
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultGetJob": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "job": {
+                    "description": "The job",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/job.JobResponse"
+                        }
+                    ]
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultGetJobs": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "jobs": {
+                    "description": "The jobs",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/job.JobResponse"
+                    }
+                },
+                "limit": {
+                    "description": "The page limit",
+                    "type": "integer"
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                },
+                "page": {
+                    "description": "The current page",
+                    "type": "integer"
+                },
+                "total": {
+                    "description": "The total number of jobs",
+                    "type": "integer"
+                },
+                "totalpages": {
+                    "description": "The total number of pages",
+                    "type": "integer"
+                }
+            }
+        },
+        "web.JSONResultGetJobsCumulativeEventCount": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "jobActivity": {
+                    "description": "The job activity metrics (cumulative event counts)",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/metrics.JobActivityMetrics"
+                        }
+                    ]
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultGetJobsMetrics": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "jobStats": {
+                    "description": "The metrics",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/metrics.JobStatsMetrics"
+                        }
+                    ]
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultGetJobsMetricsTopics": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                },
+                "metrics": {
+                    "description": "The metrics",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/metrics.JobMetricsTopicMap"
+                        }
+                    ]
+                }
+            }
+        },
+        "web.JSONResultGetLockedResources": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                },
+                "resources": {
+                    "description": "The locked resources",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/job.LockedResources"
+                        }
+                    ]
+                }
+            }
+        },
+        "web.JSONResultGetOldJobs": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer"
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string"
+                },
+                "topics": {
+                    "description": "The oldest jobs by topic",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/web.TopicOldJobsMap"
+                        }
+                    ]
+                }
+            }
+        },
+        "web.JSONResultGetResourcesStats": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                },
+                "resources": {
+                    "description": "The job resources with metrics",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/metrics.ResourceMetrics"
+                    }
+                }
+            }
+        },
+        "web.JSONResultGetSystemInfo": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                },
+                "systemInfo": {
+                    "type": "object",
+                    "properties": {
+                        "environment": {
+                            "type": "string"
+                        },
+                        "hostname": {
+                            "type": "string"
+                        },
+                        "uptime": {
+                            "type": "integer"
+                        },
+                        "version": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "web.JSONResultGetSystemResources": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "type": "string",
+                    "example": "success"
+                },
+                "resourceUsage": {
+                    "$ref": "#/definitions/web.ResourceUsage"
+                }
+            }
+        },
+        "web.JSONResultGetTopics": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                },
+                "topics": {
+                    "description": "The job topics",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "web.JSONResultGetTopicsStats": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                },
+                "topics": {
+                    "description": "The job topics with metrics",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/metrics.TopicMetrics"
+                    }
+                }
+            }
+        },
+        "web.JSONResultJobDurationList": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer"
+                },
+                "jobs": {
+                    "description": "The jobs",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/web.JobDurationResult"
+                    }
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string"
+                }
+            }
+        },
+        "web.JSONResultPullJob": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "jobs": {
+                    "description": "The jobs",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/job.JobResponse"
+                    }
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JSONResultSuccess": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "The result code",
+                    "type": "integer",
+                    "example": 200
+                },
+                "message": {
+                    "description": "The result message",
+                    "type": "string",
+                    "example": "success"
+                }
+            }
+        },
+        "web.JobDurationResult": {
+            "type": "object",
+            "properties": {
+                "created": {
+                    "description": "The job creation timestamp in milliseconds",
+                    "type": "integer"
+                },
+                "duration": {
+                    "description": "The job duration in milliseconds",
+                    "type": "integer"
+                },
+                "id": {
+                    "description": "The job UUID",
+                    "type": "string"
+                },
+                "state": {
+                    "description": "The job state",
+                    "type": "string"
+                },
+                "topic": {
+                    "description": "The job topic",
+                    "type": "string"
+                }
+            }
+        },
+        "web.ResourceBackendProvider": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                }
+            }
+        },
+        "web.ResourceMetric": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                }
+            }
+        },
+        "web.ResourceUsage": {
+            "type": "object",
+            "properties": {
+                "backend": {
+                    "$ref": "#/definitions/web.ResourceBackendProvider"
+                },
+                "disk": {
+                    "$ref": "#/definitions/web.ResourceMetric"
+                },
+                "memory": {
+                    "$ref": "#/definitions/web.ResourceMetric"
+                }
+            }
+        },
+        "web.TopOldJobsResult": {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "description": "The job duration in milliseconds",
+                    "type": "integer"
+                },
+                "jobuuid": {
+                    "description": "The job UUID",
+                    "type": "string"
+                }
+            }
+        },
+        "web.TopicOldJobsMap": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {
+                    "$ref": "#/definitions/web.TopOldJobsResult"
+                }
+            }
+        }
+    }
+}

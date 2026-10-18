@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "type": "object",
+  "title": "Schema for job",
+  "additionalProperties": false,
+  "required": [
+    "properties"
+  ],
+	"properties": {
+    "topic": {
+      "$id": "#/properties/topic",
+      "type": "string",
+      "title": "Topic Name",
+      "examples": ["example"]
+    },
+		"priority": {
+      "$id": "#/properties/priority",
+      "type": "integer",
+      "title": "Priority is the priority of the job in the queue",
+			"default": 0,
+      "examples": [0, 100]
+    },
+    "properties": {
+      "$id": "#/properties/properties",
+      "type": "object",
+      "title": "Job Properties",
+      "additionalProperties": true,
+      "examples": [
+        {
+          "key1": "value1",
+          "key2": 42,
+          "key3": [1, 2, 3],
+          "key4": {"a": 1, "b": [], "c": {"x": "value1", "y": 42}}
+        }
+      ]
+    },
+    "lockResources": {
+      "$id": "#/properties/lockResources",
+      "type": "array",
+      "title": "Lock Resources",
+      "items": {
+        "$id": "#/properties/lockResources/items",
+        "type": "string"
+      },
+      "examples": [["resource1", "resource2", "resource3:abc:def"]]
+    },
+    "userAgent": {
+      "$id": "#/properties/userAgent",
+      "type": "string",
+      "title": "User Agent",
+      "examples": ["user agent test"]
+    },
+    "requester": {
+      "$id": "#/properties/requester",
+      "type": "string",
+      "title": "Requester",
+      "examples": ["unit-test"]
+    },
+    "name": {
+      "$id": "#/properties/name",
+      "type": "string",
+      "title": "Job name",
+      "examples": ["job-name"]
+    },
+    "sessionId": {
+      "$id": "#/properties/sessionId",
+      "type": "string",
+      "title": "Session ID",
+      "examples": ["0190e951-c29a-70aa-ba59-18be4abe97a1"]
+    },
+    "traceId": {
+      "$id": "#/properties/traceId",
+      "type": "string",
+      "title": "Trace ID",
+      "examples": ["0190e951-c29a-70aa-ba59-18be4abe97a0"]
+    },
+		"startAfter": {
+      "$id": "#/properties/startAfter",
+      "type": "integer",
+      "title": "Timestamp (in milliseconds) to start the job after",
+			"default": 0,
+      "examples": [1, 60]
+    },
+		"delay": {
+      "$id": "#/properties/delay",
+      "type": "integer",
+      "title": "Delay in seconds before starting the job",
+			"default": 0,
+      "examples": [1, 60]
+    }
+  }
+}
