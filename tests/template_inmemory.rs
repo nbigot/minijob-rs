@@ -808,6 +808,61 @@ fn access_log_lines() {
     assert!(re.is_match(latency), "{latency:?}");
 }
 
+/// The backend's `notify event` debug lines (`backend.logVerbosity` 2 and more), as Go's
+/// inMemory provider writes them: `jobbackendprovider.Event` in its member order, one line
+/// per resource of a job that releases them, none for a visibility timeout change.
+#[test]
+fn backend_notify_events() {
+    let mut s = Server::start_with(T, |c| {
+        c.replacen(
+            "    logger:\n        level: \"info\"",
+            "    logger:\n        level: \"debug\"",
+            1,
+        )
+    });
+    let id = s.create(r#"{"topic":"n","lockResources":["r1","r2"]}"#);
+    assert_eq!(s.pull("topic=n"), std::slice::from_ref(&id));
+    let r = s.post(&format!(
+        "/api/v1/job/{id}/visibilitytimeout?visibilitytimeout=100"
+    ));
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(s.post(&format!("/api/v1/job/{id}/succeed")).status, 200);
+    assert_eq!(s.post("/api/v1/resources/unlock").status, 200);
+    assert_eq!(s.delete("/api/v1/jobs/").status, 200);
+    assert_eq!(s.shutdown().code(), Some(0));
+    let nil = "00000000-0000-0000-0000-000000000000";
+    let event = |t: u8, job: &str, resource: Option<&str>| {
+        let resource = resource.map_or("null".to_string(), |r| format!("\"{r}\""));
+        format!(r#""event":{{"Type":{t},"JobUUID":"{job}","Resource":{resource}}}}}"#)
+    };
+    let expected = [
+        event(0, &id, None),
+        event(2, &id, None),
+        event(3, &id, None),
+        event(5, &id, None),
+        event(14, &id, Some("r1")),
+        event(14, &id, Some("r2")),
+        event(6, &id, None),
+        event(13, nil, None),
+        event(13, nil, None),
+        event(12, nil, None),
+    ];
+    let log = s.log();
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(r#""message":"notify event""#))
+        .collect();
+    assert_eq!(lines.len(), expected.len(), "{log}");
+    for (line, event) in lines.iter().zip(&expected) {
+        assert!(
+            line.ends_with(&format!(
+                r#""topic":"backendProvider","method":"NotifyChange",{event}"#
+            )),
+            "{line}\nexpected {event}"
+        );
+    }
+}
+
 #[test]
 fn restart_reloads_configuration() {
     let mut s = start();

@@ -403,6 +403,10 @@ impl Service {
         }
         let released = st.unlock_resources(job);
         self.metrics.update_resources_locked(&job.topic, -released);
+        // Go notifies the backend of each resource of the job, held or not.
+        for r in job.resources() {
+            self.backend.on_resource_unlocked(job.id, r);
+        }
     }
 
     // ---------------------------------------------------------------- creation
@@ -1076,6 +1080,7 @@ impl Service {
                 ..State::default()
             };
             self.logger.info("All resources unlocked", &[]);
+            self.backend.on_all_resources_unlocked();
             self.metrics.on_unlock_all();
             self.metrics.on_delete_all();
             if let Some(l) = &self.event_log {
@@ -1146,6 +1151,7 @@ impl Service {
             let mut st = self.state.write();
             st.locks.clear();
             self.logger.info("All resources unlocked", &[]);
+            self.backend.on_all_resources_unlocked();
             self.metrics.on_unlock_all();
             self.enqueue_pending(&mut st, &mut fx);
         }

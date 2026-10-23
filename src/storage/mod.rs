@@ -24,9 +24,10 @@ use uuid::Uuid;
 pub type Ticket = oneshot::Receiver<()>;
 
 /// Event type numbers of the Go backend notifications (`jobbackendprovider.Event`), used in
-/// the `notify event` debug log.
-fn go_event_type(ev: ServiceEvent) -> i64 {
-    match ev {
+/// the `notify event` debug log, for the job events the Go providers handle (not a timeout:
+/// the port passes it on to save a visibility change).
+fn go_event_type(ev: ServiceEvent) -> Option<i64> {
+    Some(match ev {
         ServiceEvent::JobCreated => 0,
         ServiceEvent::JobDelayed => 1,
         ServiceEvent::JobPending => 2,
@@ -38,12 +39,13 @@ fn go_event_type(ev: ServiceEvent) -> i64 {
         ServiceEvent::JobFailed => 8,
         ServiceEvent::JobHidden => 9,
         ServiceEvent::JobTerminated => 10,
-        ServiceEvent::JobTimeout => 11,
-        ServiceEvent::JobDeletedAll => 12,
-        ServiceEvent::JobUnlockedAllResources => 13,
-        _ => 15,
-    }
+        _ => return None,
+    })
 }
+
+const EVENT_ALL_JOBS_DELETED: i64 = 12;
+const EVENT_ALL_RESOURCES_UNLOCKED: i64 = 13;
+const EVENT_RESOURCE_UNLOCKED: i64 = 14;
 
 /// `inMemory` backend: nothing to do per event; the service saves snapshots periodically.
 pub struct InMemory {
@@ -66,19 +68,26 @@ pub enum Backend {
     Redis(Box<redis::RedisBackend>),
 }
 
-fn debug_event(logger: &Logger, ev: ServiceEvent, id: Uuid) {
+/// The `notify event` debug log of the Go providers (`NotifyChange`), with the members of
+/// `jobbackendprovider.Event` in their Go order.
+fn debug_event(logger: &Logger, event_type: i64, id: Uuid, resource: Option<&str>) {
     if logger.enabled(log::Level::Debug) {
-        let event = serde_json::json!({
-            "Type": go_event_type(ev),
-            "JobUUID": id.to_string(),
-            "Resource": null,
-        });
+        let resource = match resource {
+            Some(r) => String::from_utf8(crate::gojson::to_vec_no_html(&r)).unwrap_or_default(),
+            None => "null".to_string(),
+        };
+        let event = log::Field {
+            key: "event".to_string(),
+            value: log::FieldValue::Json(format!(
+                "{{\"Type\":{event_type},\"JobUUID\":\"{id}\",\"Resource\":{resource}}}"
+            )),
+        };
         logger.debug(
             "notify event",
             &[
                 log::s("topic", "backendProvider"),
                 log::s("method", "NotifyChange"),
-                log::any("event", &event),
+                event,
             ],
         );
     }
@@ -175,57 +184,76 @@ impl Backend {
         }
     }
 
+    /// The logger of the `notify event` debug lines, when the provider writes them: Go's
+    /// inMemory and Redis providers from `backend.logVerbosity` 2, the mock one always (its
+    /// verbosity is 4).
+    fn notify_logger(&self) -> Option<&Logger> {
+        match self {
+            Backend::InMemory(m) => (m.log_verbosity >= 2).then_some(&m.logger),
+            Backend::Mock(m) => Some(&m.logger),
+            #[cfg(feature = "redis")]
+            Backend::Redis(r) => (r.log_verbosity >= 2).then_some(&r.logger),
+        }
+    }
+
+    /// The `notify event` line of a job event; Go's Redis provider only notifies the
+    /// resource events.
+    fn notify_job(&self, event_type: i64, id: Uuid) {
+        #[cfg(feature = "redis")]
+        if let Backend::Redis(_) = self {
+            return;
+        }
+        if let Some(logger) = self.notify_logger() {
+            debug_event(logger, event_type, id, None);
+        }
+    }
+
     /// A job changed (called under the service lock).
     pub fn on_job(&self, job: &Arc<Job>, ev: ServiceEvent) -> Option<Ticket> {
+        if let Some(t) = go_event_type(ev) {
+            self.notify_job(t, job.id);
+        }
         match self {
-            Backend::InMemory(m) => {
-                if m.log_verbosity >= 2 {
-                    debug_event(&m.logger, ev, job.id);
-                }
-                None
-            }
-            Backend::Mock(m) => {
-                debug_event(&m.logger, ev, job.id);
-                None
-            }
             #[cfg(feature = "redis")]
             Backend::Redis(r) => r.on_job(job, ev),
+            _ => None,
         }
     }
 
     /// A job was deleted (called under the service lock).
     pub fn on_job_deleted(&self, id: Uuid) -> Option<Ticket> {
+        if let Some(t) = go_event_type(ServiceEvent::JobDeleted) {
+            self.notify_job(t, id);
+        }
         match self {
-            Backend::InMemory(m) => {
-                if m.log_verbosity >= 2 {
-                    debug_event(&m.logger, ServiceEvent::JobDeleted, id);
-                }
-                None
-            }
-            Backend::Mock(m) => {
-                debug_event(&m.logger, ServiceEvent::JobDeleted, id);
-                None
-            }
             #[cfg(feature = "redis")]
             Backend::Redis(r) => r.on_job_deleted(id),
+            _ => None,
         }
     }
 
     /// All jobs were deleted (called under the service lock).
     pub fn on_all_deleted(&self) -> Option<Ticket> {
+        self.notify_job(EVENT_ALL_JOBS_DELETED, Uuid::nil());
         match self {
-            Backend::InMemory(m) => {
-                if m.log_verbosity >= 2 {
-                    debug_event(&m.logger, ServiceEvent::JobDeletedAll, Uuid::nil());
-                }
-                None
-            }
-            Backend::Mock(m) => {
-                debug_event(&m.logger, ServiceEvent::JobDeletedAll, Uuid::nil());
-                None
-            }
             #[cfg(feature = "redis")]
             Backend::Redis(r) => r.on_all_deleted(),
+            _ => None,
+        }
+    }
+
+    /// A job released one of its lock resources (`OnResourceUnlocked`, called for each
+    /// resource of the job, like Go).
+    pub fn on_resource_unlocked(&self, id: Uuid, resource: &str) {
+        if let Some(logger) = self.notify_logger() {
+            debug_event(logger, EVENT_RESOURCE_UNLOCKED, id, Some(resource));
+        }
+    }
+
+    /// The admin API unlocked all resources (`OnAllResourcesUnlocked`).
+    pub fn on_all_resources_unlocked(&self) {
+        if let Some(logger) = self.notify_logger() {
+            debug_event(logger, EVENT_ALL_RESOURCES_UNLOCKED, Uuid::nil(), None);
         }
     }
 
