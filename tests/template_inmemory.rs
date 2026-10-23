@@ -810,7 +810,9 @@ fn access_log_lines() {
 
 /// The backend's `notify event` debug lines (`backend.logVerbosity` 2 and more), as Go's
 /// inMemory provider writes them: `jobbackendprovider.Event` in its member order, one line
-/// per resource of a job that releases them, none for a visibility timeout change.
+/// per resource of a job that releases them, none for a visibility timeout change. With
+/// `jobs.logVerbosity` 3, the service logs each one again (`Event received`), after the
+/// verbose line of the change.
 #[test]
 fn backend_notify_events() {
     let mut s = Server::start_with(T, |c| {
@@ -819,6 +821,7 @@ fn backend_notify_events() {
             "    logger:\n        level: \"debug\"",
             1,
         )
+        .replacen("    logVerbosity: 1", "    logVerbosity: 3", 1)
     });
     let id = s.create(r#"{"topic":"n","lockResources":["r1","r2"]}"#);
     assert_eq!(s.pull("topic=n"), std::slice::from_ref(&id));
@@ -833,7 +836,7 @@ fn backend_notify_events() {
     let nil = "00000000-0000-0000-0000-000000000000";
     let event = |t: u8, job: &str, resource: Option<&str>| {
         let resource = resource.map_or("null".to_string(), |r| format!("\"{r}\""));
-        format!(r#""event":{{"Type":{t},"JobUUID":"{job}","Resource":{resource}}}}}"#)
+        format!(r#"{{"Type":{t},"JobUUID":"{job}","Resource":{resource}}}}}"#)
     };
     let expected = [
         event(0, &id, None),
@@ -856,7 +859,34 @@ fn backend_notify_events() {
     for (line, event) in lines.iter().zip(&expected) {
         assert!(
             line.ends_with(&format!(
-                r#""topic":"backendProvider","method":"NotifyChange",{event}"#
+                r#""topic":"backendProvider","method":"NotifyChange","event":{event}"#
+            )),
+            "{line}\nexpected {event}"
+        );
+    }
+    let received: Vec<&str> = log
+        .lines()
+        .filter(|l| {
+            l.contains(r#""message":"Event received""#)
+                || l.contains(r#""message":"Job enqueued""#)
+                || l.contains(r#""message":"Job started""#)
+        })
+        .collect();
+    assert_eq!(received.len(), expected.len() + 2, "{log}");
+    let enqueued = format!(r#""method":"EnqueueJob","JobUUID":"{id}"}}"#);
+    let started = format!(r#""method":"StartJob","JobUUID":"{id}"}}"#);
+    assert!(received[2].ends_with(&enqueued), "{}", received[2]);
+    assert!(received[4].ends_with(&started), "{}", received[4]);
+    let received: Vec<&&str> = received
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 2 && *i != 4)
+        .map(|(_, l)| l)
+        .collect();
+    for (line, event) in received.iter().zip(&expected) {
+        assert!(
+            line.ends_with(&format!(
+                r#""topic":"job","method":"Run","eventType":{event}"#
             )),
             "{line}\nexpected {event}"
         );
