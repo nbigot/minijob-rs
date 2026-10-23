@@ -190,8 +190,12 @@ Redis:
 ## Logs
 
 - Same zap configuration and JSON line layout. When `disableCaller: false`, the caller is a
-  Rust source file and the function name is empty; with `disableStacktrace: false` the
-  stack trace is the Rust one. YAML syntax error messages differ.
+  Rust source file and the function name is empty (an empty column with the console
+  encoding); with `disableStacktrace: false` the stack trace is the Rust one. YAML syntax
+  error messages differ.
+- With the JSON encoding, a `callerKey` without `callerEncoder` and `disableCaller: false`
+  crashed the Go server at its first log line (nil pointer); the port writes the short
+  caller.
 - The time zone abbreviation (`MST` in a `timeEncoder` layout, and in the `NextRetryTime`
   field of verbose logs) is written as the offset, `+0200` (`UTC` when the offset is zero);
   Go writes the abbreviation of the local zone when it knows it (`CEST`).

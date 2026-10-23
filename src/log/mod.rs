@@ -126,12 +126,20 @@ impl Sink {
 struct Sampler {
     initial: u64,
     thereafter: u64,
-    counts: HashMap<(Level, String), (u64, Instant)>,
+    counts: HashMap<(Level, u32), (u64, Instant)>,
+}
+
+/// zapcore's message hash: FNV-1a, 32 bits.
+fn fnv32a(s: &str) -> u32 {
+    s.bytes().fold(2_166_136_261, |h, b| {
+        (h ^ b as u32).wrapping_mul(16_777_619)
+    })
 }
 
 impl Sampler {
     /// zapcore sampler: per (level, message) and per second, log the first `initial` entries
-    /// then every `thereafter`-th.
+    /// then every `thereafter`-th. Like zap, a message counts in one of 4096 slots per level
+    /// (messages with the same slot share it).
     fn allow(&mut self, level: Level, msg: &str) -> bool {
         if level > Level::Fatal {
             return true;
@@ -139,7 +147,7 @@ impl Sampler {
         let now = Instant::now();
         let e = self
             .counts
-            .entry((level, msg.to_string()))
+            .entry((level, fnv32a(msg) % 4096))
             .or_insert((0, now));
         if now.duration_since(e.1) >= Duration::from_secs(1) {
             *e = (0, now);
@@ -364,10 +372,11 @@ impl Logger {
         } else {
             Some(Level::Error)
         };
+        // zap converts with `uint64(n)`: `initial: -1` logs everything.
         let sampler = cfg.sampling.as_ref().map(|s| {
             Mutex::new(Sampler {
-                initial: s.initial.max(0) as u64,
-                thereafter: s.thereafter.max(0) as u64,
+                initial: s.initial as u64,
+                thereafter: s.thereafter as u64,
                 counts: HashMap::new(),
             })
         });
@@ -542,6 +551,9 @@ impl Logger {
         stack: Option<&str>,
     ) -> String {
         let c = &self.inner.cfg;
+        let sep = &self.inner.separator;
+        // zap's consoleEncoder: the metadata columns, then the message and the context, each
+        // after a separator when the line is not empty.
         let mut parts: Vec<String> = Vec::new();
         if !c.time_key.is_empty() {
             parts.push(encode_time(c.time_encoder.as_ref(), &gotime::now_local()).console());
@@ -551,13 +563,22 @@ impl Logger {
         {
             parts.push(t);
         }
-        if let Some(caller) = caller
-            && !c.caller_key.is_empty()
-        {
-            parts.push(caller.to_string());
+        if let Some(caller) = caller {
+            // Without `callerEncoder` zap has no caller column (its encoder is nil).
+            if !c.caller_key.is_empty() && c.caller_encoder.is_some() {
+                parts.push(caller.to_string());
+            }
+            // The function name, unknown in Rust: an empty column.
+            if !c.function_key.is_empty() {
+                parts.push(String::new());
+            }
         }
+        let mut line = parts.join(sep);
         if !c.message_key.is_empty() {
-            parts.push(msg.to_string());
+            if !line.is_empty() {
+                line.push_str(sep);
+            }
+            line.push_str(msg);
         }
         let mut ctx = String::new();
         if !self.inner.initial.is_empty() {
@@ -567,9 +588,11 @@ impl Logger {
             push_field(&mut ctx, f, true);
         }
         if !ctx.is_empty() {
-            parts.push(format!("{{{ctx}}}"));
+            if !line.is_empty() {
+                line.push_str(sep);
+            }
+            let _ = write!(line, "{{{ctx}}}");
         }
-        let mut line = parts.join(&self.inner.separator);
         if let Some(st) = stack
             && !c.stacktrace_key.is_empty()
         {
@@ -707,5 +730,202 @@ mod tests {
         let mut json = String::new();
         EncodedTime::Float(1792351239514.7505).push_json(&mut json);
         assert_eq!(json, "1792351239514.7505");
+    }
+
+    fn sampler(initial: i64, thereafter: i64) -> Sampler {
+        let c = cfg(&format!(
+            "logger:\n  level: info\n  encoding: json\n  sampling: {{initial: {initial}, thereafter: {thereafter}}}\n"
+        ));
+        let l = Logger::build(&c).unwrap();
+        let s = l.inner.sampler.as_ref().unwrap().lock();
+        Sampler {
+            initial: s.initial,
+            thereafter: s.thereafter,
+            counts: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sampling_like_zap() {
+        assert_eq!(fnv32a(""), 0x811c9dc5);
+        assert_eq!(fnv32a("foobar"), 0xbf9cf968);
+        // The first 2 entries per second, then every 3rd.
+        let mut s = sampler(2, 3);
+        let allowed: Vec<bool> = (0..9).map(|_| s.allow(Level::Info, "m")).collect();
+        assert_eq!(
+            allowed,
+            [true, true, false, false, true, false, false, true, false]
+        );
+        // Each level counts apart; levels above Fatal are not sampled.
+        assert!(s.allow(Level::Warn, "m"));
+        // zap's `uint64(-1)`: never more than `initial`, so everything is logged.
+        let mut s = sampler(-1, 0);
+        assert!((0..100).all(|_| s.allow(Level::Info, "m")));
+        // Only the first one, then none.
+        let mut s = sampler(1, 0);
+        assert!(s.allow(Level::Error, "m"));
+        assert!(!s.allow(Level::Error, "m"));
+        // Two messages with the same slot share their count, like zap.
+        let mut slots = HashMap::new();
+        let (a, b) = (0..)
+            .map(|i| format!("message {i}"))
+            .find_map(|m| {
+                slots
+                    .insert(fnv32a(&m) % 4096, m.clone())
+                    .map(|first| (first, m))
+            })
+            .unwrap();
+        let mut s = sampler(1, 0);
+        assert!(s.allow(Level::Info, &a));
+        assert!(!s.allow(Level::Info, &b));
+    }
+
+    #[test]
+    fn console_caller_columns() {
+        let console = |encoder: &str| {
+            let c = cfg(&format!(
+                "logger:\n  level: info\n  encoding: console\n  encoderConfig:\n    messageKey: m\n    levelKey: l\n    levelEncoder: capital\n    callerKey: c\n    functionKey: f\n{encoder}"
+            ));
+            Logger::build(&c).unwrap()
+        };
+        let l = console("    callerEncoder: short\n");
+        assert_eq!(
+            l.encode_console(Level::Info, "msg", &[], Some("web/mod.rs:12"), None),
+            "INFO\tweb/mod.rs:12\t\tmsg\n"
+        );
+        assert_eq!(
+            l.encode_console(Level::Info, "msg", &[], None, None),
+            "INFO\tmsg\n"
+        );
+        // No caller encoder: zap has no caller column, the function column stays.
+        let l = console("");
+        assert_eq!(
+            l.encode_console(Level::Info, "msg", &[], Some("web/mod.rs:12"), None),
+            "INFO\t\tmsg\n"
+        );
+        // An empty first column adds no separator before the message (zap writes the
+        // metadata with `fmt.Fprint`, then a separator when the line is not empty).
+        let c = cfg(
+            "logger:\n  level: info\n  encoding: console\n  encoderConfig: {messageKey: m, functionKey: f}\n",
+        );
+        let l = Logger::build(&c).unwrap();
+        assert_eq!(
+            l.encode_console(Level::Info, "msg", &[s("k", "v")], Some("x.rs:1"), None),
+            "msg\t{\"k\": \"v\"}\n"
+        );
+        let c = cfg("logger:\n  level: info\n  encoding: console\n");
+        let l = Logger::build(&c).unwrap();
+        assert_eq!(
+            l.encode_console(Level::Info, "msg", &[s("k", "v")], None, None),
+            "{\"k\": \"v\"}\n"
+        );
+    }
+
+    #[test]
+    fn caller_and_level_encoders() {
+        let build = |encoders: &str| {
+            let c = cfg(&format!(
+                "logger:\n  level: debug\n  encoding: json\n  encoderConfig:\n    callerKey: c\n{encoders}"
+            ));
+            Logger::build(&c).unwrap()
+        };
+        let line = line!() + 1;
+        let here = Location::caller();
+        let short = build("    callerEncoder: short\n").caller_string(here);
+        assert_eq!(short, format!("log/mod.rs:{line}"));
+        let full = build("    callerEncoder: full\n").caller_string(here);
+        assert_eq!(full, format!("src/log/mod.rs:{line}"));
+        let colors = [
+            (Level::Debug, 35),
+            (Level::Info, 34),
+            (Level::Warn, 33),
+            (Level::Error, 31),
+        ];
+        for (encoder, capital) in [("color", false), ("capitalColor", true)] {
+            let l = build(&format!("    levelEncoder: {encoder}\n"));
+            for (level, code) in colors {
+                let text = if capital {
+                    level.capital()
+                } else {
+                    level.lower()
+                };
+                assert_eq!(
+                    l.level_text(level).unwrap(),
+                    format!("\x1b[{code}m{text}\x1b[0m")
+                );
+            }
+        }
+        assert_eq!(build("").level_text(Level::Info), None);
+    }
+
+    #[test]
+    fn writes_to_files() {
+        let dir = std::env::temp_dir().join(format!("minijob-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.log");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "before\n").unwrap();
+        let c = cfg(&format!(
+            concat!(
+                "logger:\n  level: info\n  development: true\n  encoding: json\n",
+                "  encoderConfig: {{messageKey: m, levelKey: l, levelEncoder: lowercase, ",
+                "stacktraceKey: st, callerKey: c, callerEncoder: short}}\n",
+                "  outputPaths: ['{}']\n  errorOutputPaths: ['file://{}']\n",
+                "  sampling: {{initial: 1, thereafter: 0}}\n",
+            ),
+            path.display(),
+            dir.join("err.log").display()
+        ));
+        let l = Logger::build(&c).unwrap();
+        assert!(l.enabled(Level::Info) && !l.enabled(Level::Debug));
+        l.debug("hidden", &[]);
+        let info_line = line!() + 1;
+        l.info("one", &[int("n", -1), boolean("b", true)]);
+        // Sampled out: the same message in the same second.
+        l.info("one", &[]);
+        let warn_line = line!() + 1;
+        l.warn("two", &[]);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines[0], "before");
+        assert_eq!(
+            lines[1],
+            format!(
+                "{{\"l\":\"info\",\"c\":\"log/mod.rs:{info_line}\",\"m\":\"one\",\"n\":-1,\"b\":true}}"
+            )
+        );
+        // Development: stack traces from the warn level.
+        assert!(lines[2].starts_with(&format!(
+            "{{\"l\":\"warn\",\"c\":\"log/mod.rs:{warn_line}\",\"m\":\"two\",\"st\":\""
+        )));
+        // The error output is opened (created) too.
+        assert!(dir.join("err.log").exists());
+        let c = cfg(&format!(
+            "logger:\n  level: info\n  encoding: json\n  outputPaths: ['{}']\n",
+            dir.join("missing").join("x.log").display()
+        ));
+        assert!(Logger::build(&c).unwrap_err().starts_with("open "));
+        drop(l);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn any_fields() {
+        let mut out = String::new();
+        let v: Value =
+            serde_json::from_str(r#"[true, 18446744073709551615, -2, 1.5, {"a": "<"}]"#).unwrap();
+        for (i, x) in v.as_array().unwrap().iter().enumerate() {
+            push_field(&mut out, &any(&i.to_string(), x), false);
+        }
+        assert_eq!(
+            out,
+            r#""0":true,"1":18446744073709551615,"2":-2,"3":1.5,"4":{"a":"<"}"#
+        );
+        let mut out = String::new();
+        zap_string(&mut out, "a\u{1}\r\t\n\\");
+        zap_float(&mut out, -0.0);
+        zap_float(&mut out, -2.5e-7);
+        assert_eq!(out, "\"a\\u0001\\r\\t\\n\\\\\"-0-0.00000025");
     }
 }
