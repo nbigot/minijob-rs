@@ -78,15 +78,18 @@ fn tokenize(layout: &str) -> Vec<Tok> {
     let mut out = Vec::new();
     let mut i = 0;
     let starts = |i: usize, s: &str| layout[i..].starts_with(s);
+    // `Jan` and `Mon` followed by a lowercase letter are literal text (`Janu`).
+    let word =
+        |i: usize, s: &str| starts(i, s) && !b.get(i + 3).is_some_and(u8::is_ascii_lowercase);
     while i < b.len() {
         let rest = &layout[i..];
         let (tok, len) = if rest.starts_with("January") {
             (Tok::LongMonth, 7)
-        } else if rest.starts_with("Jan") {
+        } else if word(i, "Jan") {
             (Tok::Month, 3)
         } else if rest.starts_with("Monday") {
             (Tok::LongWeekDay, 6)
-        } else if rest.starts_with("Mon") {
+        } else if word(i, "Mon") {
             (Tok::WeekDay, 3)
         } else if rest.starts_with("MST") {
             (Tok::TZ, 3)
@@ -110,6 +113,9 @@ fn tokenize(layout: &str) -> Vec<Tok> {
             (Tok::Year, 2)
         } else if rest.starts_with("15") {
             (Tok::Hour, 2)
+        } else if rest.starts_with("_2006") {
+            // A literal `_` followed by the year.
+            (Tok::Lit('_'), 1)
         } else if rest.starts_with("_2") {
             (Tok::UnderDay, 2)
         } else if rest.starts_with("PM") {
@@ -310,10 +316,13 @@ pub fn format(t: &DateTime<FixedOffset>, layout: &str) -> String {
                 let _ = write!(s, "{:02}", t.second());
             }
             Tok::LongYear => {
-                let _ = write!(s, "{:04}", t.year());
+                if t.year() < 0 {
+                    s.push('-');
+                }
+                let _ = write!(s, "{:04}", t.year().unsigned_abs());
             }
             Tok::Year => {
-                let _ = write!(s, "{:02}", t.year().rem_euclid(100));
+                let _ = write!(s, "{:02}", t.year().unsigned_abs() % 100);
             }
             Tok::PM => s.push_str(if t.hour() >= 12 { "PM" } else { "AM" }),
             Tok::Pm => s.push_str(if t.hour() >= 12 { "pm" } else { "am" }),
@@ -462,6 +471,18 @@ mod tests {
             "2026-01-04T15:04:05.446"
         );
         assert_eq!(format(&t(0), "Mon Jan _2 3:04PM"), "Sun Jan  4 3:04PM");
+        // Like Go: words starting with `Jan` or `Mon` are text, `_2006` is `_` and the year.
+        assert_eq!(format(&t(0), "Janvier Monde Jan."), "Janvier Monde Jan.");
+        assert_eq!(format(&t(0), "x_2006"), "x_2026");
+    }
+
+    #[test]
+    fn negative_years() {
+        let t = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(-5, 3, 1, 0, 0, 0)
+            .unwrap();
+        assert_eq!(format(&t, "2006 06"), "-0005 05");
     }
 
     #[test]
