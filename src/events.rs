@@ -54,3 +54,45 @@ impl ServiceEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Go's `ServiceEventType.String()`, except `Hidden` (Go: `other`).
+    #[test]
+    fn names_like_go() {
+        use ServiceEvent::*;
+        let names: Vec<&str> = [
+            JobCreated,
+            JobDelayed,
+            JobPending,
+            JobEnqueued,
+            JobStarted,
+            JobSucceeded,
+            JobCanceled,
+            JobFailed,
+            JobHidden,
+            JobDeleted,
+            JobTimeout,
+            JobTerminated,
+            JobLoaded,
+            JobDeletedAll,
+            JobUnlockedAllResources,
+            JobHealthcheck,
+            JobMetrics,
+            EmptyPollReceived,
+            Ready,
+            Shutdown,
+        ]
+        .into_iter()
+        .map(ServiceEvent::name)
+        .collect();
+        assert_eq!(
+            names.join(" "),
+            "Created Delayed Pending Enqueued Started Succeeded Canceled Failed Hidden Deleted \
+             Timeout Terminated Loaded DeletedAll UnlockedAllResources Healthcheck Metrics \
+             EmptyPollReceived Ready Shutdown"
+        );
+    }
+}
