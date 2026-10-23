@@ -416,36 +416,46 @@ pub async fn run(cfg: Arc<Config>, version: &str, logger: Logger) -> Result<Outc
         &[log::s("topic", "server"), log::s("version", version)],
     );
     let svc = Service::create(cfg.clone(), version, logger.clone()).await?;
-    let init_error = |e: String| {
+    // `apiServer.Initialize` failed: the service, not started yet, is stopped.
+    let init_failed = |e: String| {
         logger.error(
             "Cannot initialize server",
             &[log::s("topic", "server"), log::err(&e)],
         );
-        e
+        let svc = svc.clone();
+        async move {
+            svc.stop().await;
+            Err(e)
+        }
     };
     let schema = if cfg.jobs.json_schema.enable {
         let path = &cfg.jobs.json_schema.path;
-        let bytes = std::fs::read(path).map_err(|e| {
-            init_error(format!(
-                "error reading schema file: {}",
-                crate::config::go_open_error(path, &e)
-            ))
-        })?;
-        Some(
-            crate::schema::Schema::compile(&bytes)
-                .map_err(|e| init_error(format!("error unmarshaling schema: {e}")))?,
-        )
+        let compiled = std::fs::read(path)
+            .map_err(|e| {
+                format!(
+                    "error reading schema file: {}",
+                    crate::config::go_open_error(path, &e)
+                )
+            })
+            .and_then(|bytes| {
+                crate::schema::Schema::compile(&bytes)
+                    .map_err(|e| format!("error unmarshaling schema: {e}"))
+            });
+        match compiled {
+            Ok(s) => Some(s),
+            Err(e) => return init_failed(e).await,
+        }
     } else {
         None
     };
     let cors = if cfg.webserver.cors.enable {
-        Some(
-            cors::Cors::new(
-                &cfg.webserver.cors.allow_origins,
-                &cfg.webserver.cors.allow_headers,
-            )
-            .map_err(init_error)?,
-        )
+        match cors::Cors::new(
+            &cfg.webserver.cors.allow_origins,
+            &cfg.webserver.cors.allow_headers,
+        ) {
+            Ok(c) => Some(c),
+            Err(e) => return init_failed(e).await,
+        }
     } else {
         None
     };
@@ -469,12 +479,14 @@ pub async fn run(cfg: Arc<Config>, version: &str, logger: Logger) -> Result<Outc
         monitor: monitor::Monitor::default(),
     });
     let consul = if cfg.consul.enable {
-        let c = crate::consul::Consul::new(&cfg.consul, logger.clone()).map_err(init_error)?;
-        if let Err(e) = c.register().await {
-            svc.stop().await;
-            return Err(e);
+        let registered = match crate::consul::Consul::new(&cfg.consul, logger.clone()) {
+            Ok(c) => c.register().await.map(|()| c),
+            Err(e) => Err(e),
+        };
+        match registered {
+            Ok(c) => Some(c),
+            Err(e) => return init_failed(e).await,
         }
-        Some(c)
     } else {
         None
     };

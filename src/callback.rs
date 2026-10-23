@@ -9,6 +9,7 @@
 
 use crate::gojson::quote;
 use crate::gourl;
+use crate::httperr;
 use crate::log::{self, Logger};
 use crate::model::Job;
 use serde::Serialize;
@@ -99,7 +100,7 @@ impl Callbacks {
                 .header("User-Agent", "MiniJob-Callback/1.0")
                 .body(body.clone());
             match req.send().await {
-                Err(e) => last_err = request_failed(url, &cause(&e)),
+                Err(e) => last_err = request_failed(url, &httperr::cause(&e)),
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     if (200..300).contains(&status) {
@@ -131,50 +132,12 @@ fn check_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The `*url.Error` of `http.Client.Do`: `Post "<url>": <cause>`, the password hidden.
+/// The error of `http.Client.Do`.
 fn request_failed(url: &str, cause: &str) -> String {
     format!(
-        "HTTP request failed: Post {}: {cause}",
-        quote(&strip_password(url))
+        "HTTP request failed: {}",
+        httperr::url_error("Post", url, cause)
     )
-}
-
-/// Go's `stripPassword`: `user:***@`.
-fn strip_password(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let Some(at) = rest[..authority_end].rfind('@') else {
-        return url.to_string();
-    };
-    match rest[..at].split_once(':') {
-        Some((user, _)) => format!("{scheme}://{user}:***{}", &rest[at..]),
-        None => url.to_string(),
-    }
-}
-
-/// Why a request failed: the messages of the error's sources (reqwest's own message only
-/// repeats the URL); a timeout reads like Go's.
-fn cause(e: &reqwest::Error) -> String {
-    if e.is_timeout() {
-        return "context deadline exceeded".to_string();
-    }
-    let mut parts = Vec::new();
-    let mut source = std::error::Error::source(e);
-    while let Some(s) = source {
-        let m = s.to_string();
-        // hyper-util's wrapper (`client error (Connect)`) adds nothing.
-        if !m.starts_with("client error (") {
-            parts.push(m);
-        }
-        source = s.source();
-    }
-    if parts.is_empty() {
-        e.to_string()
-    } else {
-        parts.join(": ")
-    }
 }
 
 #[cfg(test)]
@@ -204,12 +167,6 @@ mod tests {
             "HTTP request failed: Post \"HTTP:opaque\": http: no Host in request URL"
         );
         assert!(check_url("https://user:pw@example.com:8443/cb?x=1").is_ok());
-        assert_eq!(
-            strip_password("https://user:p@ss@example.com/a@b"),
-            "https://user:***@example.com/a@b"
-        );
-        assert_eq!(strip_password("http://user@h/"), "http://user@h/");
-        assert_eq!(strip_password("http://h/a:b@c"), "http://h/a:b@c");
     }
 
     #[tokio::test]

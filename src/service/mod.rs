@@ -176,6 +176,7 @@ pub struct Service {
     backend: Backend,
     shutdown_tx: watch::Sender<bool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    started: AtomicBool,
     stopped: AtomicBool,
 }
 
@@ -247,6 +248,7 @@ impl Service {
             backend,
             shutdown_tx,
             tasks: Mutex::new(Vec::new()),
+            started: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
         });
         svc.restore(jobs);
@@ -1228,6 +1230,7 @@ impl Service {
 
     /// Starts the background tasks (`Service.Run`).
     pub fn start(self: &Arc<Self>) {
+        self.started.store(true, Ordering::SeqCst);
         self.logger.info(
             "Service started",
             &[log::s("topic", "service"), log::s("method", "Run")],
@@ -1338,10 +1341,13 @@ impl Service {
         if let Some(l) = &self.event_log {
             l.close();
         }
-        self.logger.info(
-            "Service stopped",
-            &[log::s("topic", "service"), log::s("method", "Run")],
-        );
+        // Not when the server failed to start before the service.
+        if self.started.load(Ordering::SeqCst) {
+            self.logger.info(
+                "Service stopped",
+                &[log::s("topic", "service"), log::s("method", "Run")],
+            );
+        }
     }
 }
 

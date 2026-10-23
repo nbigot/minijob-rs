@@ -13,6 +13,7 @@ pub mod gojson;
 pub mod gomail;
 pub mod goregex;
 pub mod gourl;
+pub mod httperr;
 pub mod log;
 pub mod metrics;
 pub mod model;
