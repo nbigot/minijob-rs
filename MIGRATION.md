@@ -167,6 +167,8 @@ Redis:
   retry: 18 s with the template URL instead of 6 s). In Go a failed write was only logged:
   the job reached Redis only if a later change to the same job was saved.
 - All go-redis URL options are accepted; `client_name` is set on the first connection.
+- No `Error closing Redis client` line at shutdown (Go stopped the provider twice and logged
+  `redis: client is closed`).
 
 ## Callbacks
 
