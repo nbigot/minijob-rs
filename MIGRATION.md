@@ -135,6 +135,10 @@ version that are fixed here; the few deliberate behavior changes are marked **(c
   subschema as JSON; Go printed an internal structure with memory addresses.
 - The schema is compiled at startup and shared safely between requests (Go modified it on
   first use from concurrent requests).
+- A schema that makes Go's validator crash the server is handled: an empty `enum` or `type`
+  list gives its usual error, a `null` subschema `schema is nil`, and a `$ref` that loops back
+  to its own schema without going into the document (`{"$ref": "#"}`) adds no constraint (Go
+  recursed until the stack overflowed).
 - A schema file Go refuses is refused with the same message, except a JSON syntax error,
   worded differently (`EOF while parsing an object at line 1 column 16`; Go: `unexpected
   end of JSON input`).
