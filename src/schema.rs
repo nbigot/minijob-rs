@@ -12,6 +12,7 @@
 //!   downloaded and fail like an unreachable one does in Go;
 //! - the details of `format` errors that quote Go library messages are approximations.
 
+use crate::gojson::decode::{Entries, go_text, match_field, members};
 use crate::gojson::{fmt_float_v, to_vec};
 use regex::Regex;
 use serde_json::Value;
@@ -162,6 +163,8 @@ enum Node {
     },
     /// Placeholder while a `$ref` target is compiled (cycles).
     Pending,
+    /// A nil `*Schema` (`null` in a list or map of schemas): fails with `schema is nil`.
+    Nil,
 }
 
 /// A compiled schema. Immutable, `Send + Sync`.
@@ -181,33 +184,142 @@ fn json_err(prop: &str, e: impl std::fmt::Display) -> String {
     format!("error unmarshaling {prop} from json: {e}")
 }
 
-fn parse_raw<'a, T: serde::Deserialize<'a>>(prop: &str, raw: &'a RawValue) -> Result<T, String> {
-    serde_json::from_str(raw.get()).map_err(|e| json_err(prop, e))
-}
+// Decoding of the keywords with the semantics of Go's `json.Unmarshal` into qri-io's types:
+// `null` leaves a value unchanged (zero), other kinds of the wrong type are errors worded as
+// Go's `UnmarshalTypeError`.
 
-fn go_int(prop: &str, raw: &RawValue, go_type: &str) -> Result<i64, String> {
-    let v: Value = parse_raw(prop, raw)?;
-    match v.as_i64() {
-        Some(i) => Ok(i),
-        None => Err(json_err(
-            prop,
-            format!(
-                "json: cannot unmarshal {} into Go value of type jsonschema.{go_type}",
-                kind_of(&v)
-            ),
-        )),
+/// The kind of a JSON value, as Go names it in its errors.
+fn go_kind(raw: &RawValue) -> &'static str {
+    match raw.get().trim_start().as_bytes().first() {
+        Some(b'n') => "null",
+        Some(b't' | b'f') => "bool",
+        Some(b'"') => "string",
+        Some(b'[') => "array",
+        Some(b'{') => "object",
+        _ => "number",
     }
 }
 
-fn kind_of(v: &Value) -> String {
-    match v {
-        Value::Null => "null".into(),
-        Value::Bool(_) => "bool".into(),
-        Value::Number(n) => format!("number {n}"),
-        Value::String(_) => "string".into(),
-        Value::Array(_) => "array".into(),
-        Value::Object(_) => "object".into(),
+fn type_error(value: &str, go_type: &str) -> String {
+    format!("json: cannot unmarshal {value} into Go value of type {go_type}")
+}
+
+/// Into a Go string type; `None` for `null`.
+fn go_string(raw: &RawValue, go_type: &str) -> Result<Option<String>, String> {
+    match go_kind(raw) {
+        "null" => Ok(None),
+        "string" => serde_json::from_str(raw.get())
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        k => Err(type_error(k, go_type)),
     }
+}
+
+/// Into a Go bool type; `None` for `null`.
+fn go_bool(raw: &RawValue, go_type: &str) -> Result<Option<bool>, String> {
+    match go_kind(raw) {
+        "null" => Ok(None),
+        "bool" => Ok(Some(raw.get().trim() == "true")),
+        k => Err(type_error(k, go_type)),
+    }
+}
+
+/// Into a Go float64 type: `strconv.ParseFloat` of the literal (`1e400` is an error).
+fn go_float(raw: &RawValue, go_type: &str) -> Result<Option<f64>, String> {
+    match go_kind(raw) {
+        "null" => Ok(None),
+        "number" => {
+            let lit = raw.get().trim();
+            match lit.parse::<f64>() {
+                Ok(f) if f.is_finite() => Ok(Some(f)),
+                _ => Err(type_error(&format!("number {lit}"), go_type)),
+            }
+        }
+        k => Err(type_error(k, go_type)),
+    }
+}
+
+/// Into a Go int type: `strconv.ParseInt` of the literal (`-0` is 0; `1.0`, `1e3` and
+/// out of range values are errors).
+fn go_int(raw: &RawValue, go_type: &str) -> Result<Option<i64>, String> {
+    match go_kind(raw) {
+        "null" => Ok(None),
+        "number" => {
+            let lit = raw.get().trim();
+            let digits = lit.strip_prefix('-').unwrap_or(lit);
+            match lit.parse::<i64>() {
+                Ok(i) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
+                    Ok(Some(i))
+                }
+                _ => Err(type_error(&format!("number {lit}"), go_type)),
+            }
+        }
+        k => Err(type_error(k, go_type)),
+    }
+}
+
+/// Into a Go slice type: the elements; `None` for `null`.
+fn go_array<'a>(raw: &'a RawValue, go_type: &str) -> Result<Option<Vec<&'a RawValue>>, String> {
+    match go_kind(raw) {
+        "null" => Ok(None),
+        "array" => serde_json::from_str(raw.get())
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        k => Err(type_error(k, go_type)),
+    }
+}
+
+/// Into a Go map type: the members in document order (duplicates kept: Go decodes each, the
+/// last one stays); `None` for `null`.
+fn go_object(raw: &RawValue, go_type: &str) -> Result<Option<Entries>, String> {
+    match go_kind(raw) {
+        "null" => Ok(None),
+        "object" => members(raw).map_err(|_| type_error("object", go_type)),
+        k => Err(type_error(k, go_type)),
+    }
+}
+
+/// Into a `[]string` type: `null` elements are `""`; the first wrong element is the error.
+fn go_strings(raw: &RawValue, go_type: &str) -> Result<Option<Vec<String>>, String> {
+    let Some(items) = go_array(raw, go_type)? else {
+        return Ok(None);
+    };
+    items
+        .into_iter()
+        .map(|item| go_string(item, "string").map(Option::unwrap_or_default))
+        .collect::<Result<_, _>>()
+        .map(Some)
+}
+
+/// Into an `interface{}`: anything, except a number out of the float64 range.
+fn go_any(raw: &RawValue) -> Result<(), String> {
+    let text = raw.get().as_bytes();
+    let mut i = 0;
+    while i < text.len() {
+        match text[i] {
+            b'"' => {
+                i += 1;
+                while i < text.len() && text[i] != b'"' {
+                    i += if text[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < text.len()
+                    && matches!(text[i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
+                    i += 1;
+                }
+                let lit = String::from_utf8_lossy(&text[start..i]);
+                if !lit.parse::<f64>().is_ok_and(f64::is_finite) {
+                    return Err(type_error(&format!("number {lit}"), "float64"));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
 }
 
 /// Evaluates a JSON pointer (RFC 6901) over raw JSON text.
@@ -277,26 +389,32 @@ impl Compiler<'_> {
         self.nodes.len() - 1
     }
 
-    fn compile(&mut self, prop: &str, raw: &RawValue) -> Result<NodeId, String> {
-        let text = raw.get().trim();
-        if text == "true" {
-            return Ok(self.push(Node::True));
+    /// `Schema.UnmarshalJSON`: Go's error is returned as is (each keyword adds its prefix).
+    fn compile(&mut self, raw: &RawValue) -> Result<NodeId, String> {
+        match go_kind(raw) {
+            // `json.Unmarshal(data, &b)` succeeds for a boolean, and for `null` (false).
+            "bool" if raw.get().trim() == "true" => return Ok(self.push(Node::True)),
+            "bool" | "null" => return Ok(self.push(Node::False)),
+            "object" => {}
+            k => return Err(type_error(k, "jsonschema._schema")),
         }
-        if text == "false" {
-            return Ok(self.push(Node::False));
+        let entries = members(raw).ok().flatten().unwrap_or_default();
+        // Decoded into a struct with `$id` first (keys matched without case).
+        for (key, value) in &entries {
+            if match_field(key, &["$id"]).is_some() && go_string(value, "string").is_err() {
+                return Err(format!(
+                    "json: cannot unmarshal {} into Go struct field _schema.$id of type string",
+                    go_kind(value)
+                ));
+            }
         }
-        let members: BTreeMap<String, &RawValue> =
-            serde_json::from_str(raw.get()).map_err(|e| {
-                if prop.is_empty() {
-                    e.to_string()
-                } else {
-                    json_err(prop, e)
-                }
-            })?;
+        // Then into a map: the last duplicate wins.
+        let members: BTreeMap<&str, &RawValue> =
+            entries.iter().map(|(k, v)| (k.as_str(), &**v)).collect();
         let id = self.push(Node::Pending);
         let mut named: Vec<(&str, Kw)> = Vec::new();
         for (name, raw) in &members {
-            if let Some(kw) = self.keyword(name, raw)? {
+            if let Some(kw) = self.keyword(name, raw).map_err(|e| json_err(name, e))? {
                 named.push((
                     KEYWORDS.iter().find(|k| *k == name).copied().unwrap_or(""),
                     kw,
@@ -312,201 +430,253 @@ impl Compiler<'_> {
         Ok(id)
     }
 
+    /// A `*Schema` element of a slice or map: `null` is a nil schema.
+    fn compile_ptr(&mut self, raw: &RawValue) -> Result<NodeId, String> {
+        if go_kind(raw) == "null" {
+            return Ok(self.push(Node::Nil));
+        }
+        self.compile(raw)
+    }
+
+    /// `[]*Schema`.
+    fn schema_list(&mut self, raw: &RawValue, go_type: &str) -> Result<Vec<NodeId>, String> {
+        go_array(raw, go_type)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| self.compile_ptr(v))
+            .collect()
+    }
+
+    /// `map[string]*Schema` (`by_value`: `map[string]Schema`, where `null` is the false
+    /// schema).
     fn schema_map(
         &mut self,
-        prop: &str,
         raw: &RawValue,
+        go_type: &str,
+        by_value: bool,
     ) -> Result<BTreeMap<String, NodeId>, String> {
-        let m: BTreeMap<String, &RawValue> = parse_raw(prop, raw)?;
         let mut out = BTreeMap::new();
-        for (k, v) in m {
-            out.insert(k, self.compile(prop, v)?);
+        for (k, v) in go_object(raw, go_type)?.unwrap_or_default() {
+            let id = if by_value {
+                self.compile(&v)?
+            } else {
+                self.compile_ptr(&v)?
+            };
+            out.insert(k, id);
         }
         Ok(out)
     }
 
-    fn schema_list(&mut self, prop: &str, raw: &RawValue) -> Result<Vec<NodeId>, String> {
-        let l: Vec<&RawValue> = parse_raw(prop, raw)?;
-        l.into_iter().map(|v| self.compile(prop, v)).collect()
-    }
-
+    /// Decodes a keyword as qri-io does; the error is without its `error unmarshaling` prefix.
     fn keyword(&mut self, name: &str, raw: &RawValue) -> Result<Option<Kw>, String> {
-        let p = name;
+        let ty = |t: &str| format!("jsonschema.{t}");
         Ok(Some(match name {
-            "$ref" | "$recursiveRef" => {
-                let r: String = if name == "$ref" {
-                    parse_raw(p, raw)?
-                } else {
-                    "#".into()
-                };
-                let target = self.resolve(&r)?;
+            "$ref" => {
+                let r = go_string(raw, "string")?.unwrap_or_default();
+                let target = self.resolve(&r);
                 Kw::Ref(r, target)
             }
+            "$recursiveRef" => {
+                go_string(raw, "string")?;
+                Kw::Ref("#".into(), self.resolve("#"))
+            }
             "type" => {
-                let v: Value = parse_raw(p, raw)?;
-                let vals: Vec<String> = match v {
-                    Value::String(s) => vec![s],
-                    Value::Array(a) => a
-                        .into_iter()
-                        .map(|x| {
-                            x.as_str()
-                                .map(str::to_string)
-                                .ok_or_else(|| json_err(p, "json: cannot unmarshal into []string"))
-                        })
-                        .collect::<Result<_, _>>()?,
-                    _ => return Err(json_err(p, "json: cannot unmarshal into []string")),
+                let vals = match go_kind(raw) {
+                    "string" | "null" => vec![go_string(raw, "string")?.unwrap_or_default()],
+                    _ => go_strings(raw, "[]string")?.unwrap_or_default(),
                 };
-                for t in &vals {
-                    if ![
+                if let Some(t) = vals.iter().find(|t| {
+                    ![
                         "null", "boolean", "object", "array", "number", "string", "integer",
                     ]
                     .contains(&t.as_str())
-                    {
-                        return Err(json_err(p, format!("\"{t}\" is not a valid type")));
-                    }
+                }) {
+                    return Err(format!("\"{t}\" is not a valid type"));
                 }
                 Kw::Type(vals)
             }
-            "enum" => {
-                let items: Vec<&RawValue> = parse_raw(p, raw)?;
-                Kw::Enum(
-                    items
-                        .into_iter()
-                        .map(|r| {
-                            (
-                                serde_json::from_str(r.get()).unwrap_or(Value::Null),
-                                r.get().to_string(),
-                            )
-                        })
-                        .collect(),
-                )
+            "enum" => Kw::Enum(
+                go_array(raw, &ty("Enum"))?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            serde_json::from_str(r.get()).unwrap_or(Value::Null),
+                            r.get().to_string(),
+                        )
+                    })
+                    .collect(),
+            ),
+            "const" => Kw::Const(serde_json::from_str(raw.get()).unwrap_or(Value::Null)),
+            "multipleOf" => Kw::MultipleOf(go_float(raw, &ty("MultipleOf"))?.unwrap_or(0.0)),
+            "maximum" => Kw::Maximum(go_float(raw, &ty("Maximum"))?.unwrap_or(0.0)),
+            "exclusiveMaximum" => {
+                Kw::ExclusiveMaximum(go_float(raw, &ty("ExclusiveMaximum"))?.unwrap_or(0.0))
             }
-            "const" => Kw::Const(parse_raw(p, raw)?),
-            "multipleOf" => Kw::MultipleOf(parse_raw(p, raw)?),
-            "maximum" => Kw::Maximum(parse_raw(p, raw)?),
-            "exclusiveMaximum" => Kw::ExclusiveMaximum(parse_raw(p, raw)?),
-            "minimum" => Kw::Minimum(parse_raw(p, raw)?),
-            "exclusiveMinimum" => Kw::ExclusiveMinimum(parse_raw(p, raw)?),
-            "maxLength" => Kw::MaxLength(go_int(p, raw, "MaxLength")?),
-            "minLength" => Kw::MinLength(go_int(p, raw, "MinLength")?),
+            "minimum" => Kw::Minimum(go_float(raw, &ty("Minimum"))?.unwrap_or(0.0)),
+            "exclusiveMinimum" => {
+                Kw::ExclusiveMinimum(go_float(raw, &ty("ExclusiveMinimum"))?.unwrap_or(0.0))
+            }
+            "maxLength" => Kw::MaxLength(go_int(raw, &ty("MaxLength"))?.unwrap_or(0)),
+            "minLength" => Kw::MinLength(go_int(raw, &ty("MinLength"))?.unwrap_or(0)),
             "pattern" => {
-                let s: String = parse_raw(p, raw)?;
-                let re = crate::goregex::compile(&s).map_err(|e| json_err(p, e))?;
+                let s = go_string(raw, "string")?.unwrap_or_default();
+                let re = crate::goregex::compile(&s)?;
                 Kw::Pattern(re, s)
             }
-            "allOf" => Kw::AllOf(self.schema_list(p, raw)?),
-            "anyOf" => Kw::AnyOf(self.schema_list(p, raw)?),
-            "oneOf" => Kw::OneOf(self.schema_list(p, raw)?),
-            "not" => Kw::Not(self.compile(p, raw)?),
-            "properties" => Kw::Properties(self.schema_map(p, raw)?),
+            "allOf" => Kw::AllOf(self.schema_list(raw, &ty("AllOf"))?),
+            "anyOf" => Kw::AnyOf(self.schema_list(raw, &ty("AnyOf"))?),
+            "oneOf" => Kw::OneOf(self.schema_list(raw, &ty("OneOf"))?),
+            "not" => Kw::Not(self.compile(raw)?),
+            "properties" => Kw::Properties(self.schema_map(raw, &ty("Properties"), false)?),
             "patternProperties" => {
-                let m = self.schema_map(p, raw)?;
+                let m = self.schema_map(raw, "map[string]*jsonschema.Schema", false)?;
                 let mut list = Vec::new();
                 for (k, v) in m {
                     let re = crate::goregex::compile(&k)
-                        .map_err(|e| json_err(p, format!("invalid pattern: {k}: {e}")))?;
+                        .map_err(|e| format!("invalid pattern: {k}: {e}"))?;
                     list.push((re, v));
                 }
                 Kw::PatternProperties(list)
             }
-            "additionalProperties" => Kw::AdditionalProperties(self.compile(p, raw)?),
-            "required" => Kw::Required(parse_raw(p, raw)?),
-            "propertyNames" => Kw::PropertyNames(self.compile(p, raw)?),
-            "maxProperties" => Kw::MaxProperties(go_int(p, raw, "MaxProperties")?),
-            "minProperties" => Kw::MinProperties(go_int(p, raw, "MinProperties")?),
-            "dependentSchemas" => Kw::DependentSchemas(self.schema_map(p, raw)?),
-            "dependentRequired" => Kw::DependentRequired(parse_raw(p, raw)?),
-            "unevaluatedProperties" => Kw::UnevaluatedProperties(self.compile(p, raw)?),
-            "items" => {
-                if raw.get().trim_start().starts_with('[') {
-                    Kw::Items {
-                        single: false,
-                        schemas: self.schema_list(p, raw)?,
-                    }
-                } else {
-                    Kw::Items {
-                        single: true,
-                        schemas: vec![self.compile(p, raw)?],
-                    }
-                }
+            "additionalProperties" => Kw::AdditionalProperties(self.compile(raw)?),
+            "required" => Kw::Required(go_strings(raw, &ty("Required"))?.unwrap_or_default()),
+            "propertyNames" => Kw::PropertyNames(self.compile(raw)?),
+            "maxProperties" => Kw::MaxProperties(go_int(raw, &ty("MaxProperties"))?.unwrap_or(0)),
+            "minProperties" => Kw::MinProperties(go_int(raw, &ty("MinProperties"))?.unwrap_or(0)),
+            "dependentSchemas" => {
+                Kw::DependentSchemas(self.schema_map(raw, &ty("_dependentSchemas"), true)?)
             }
-            "additionalItems" => Kw::AdditionalItems(self.compile(p, raw)?),
-            "maxItems" => Kw::MaxItems(go_int(p, raw, "MaxItems")?),
-            "minItems" => Kw::MinItems(go_int(p, raw, "MinItems")?),
+            "dependentRequired" => {
+                let mut deps = BTreeMap::new();
+                for (k, v) in go_object(raw, &ty("_dependentRequired"))?.unwrap_or_default() {
+                    deps.insert(k, go_strings(&v, "[]string")?.unwrap_or_default());
+                }
+                Kw::DependentRequired(deps)
+            }
+            "unevaluatedProperties" => Kw::UnevaluatedProperties(self.compile(raw)?),
+            // A schema, else a list of schemas (whose error is the one reported).
+            "items" => match self.compile(raw) {
+                Ok(id) => Kw::Items {
+                    single: true,
+                    schemas: vec![id],
+                },
+                Err(_) => Kw::Items {
+                    single: false,
+                    schemas: self.schema_list(raw, "[]*jsonschema.Schema")?,
+                },
+            },
+            "additionalItems" => Kw::AdditionalItems(self.compile(raw)?),
+            "maxItems" => Kw::MaxItems(go_int(raw, &ty("MaxItems"))?.unwrap_or(0)),
+            "minItems" => Kw::MinItems(go_int(raw, &ty("MinItems"))?.unwrap_or(0)),
             "uniqueItems" => {
-                let _: bool = parse_raw(p, raw)?;
+                go_bool(raw, &ty("UniqueItems"))?;
                 Kw::UniqueItems
             }
-            "contains" => Kw::Contains(self.compile(p, raw)?, raw.get().to_string()),
-            "maxContains" => Kw::MaxContains(go_int(p, raw, "MaxContains")?),
-            "minContains" => Kw::MinContains(go_int(p, raw, "MinContains")?),
-            "unevaluatedItems" => Kw::UnevaluatedItems(self.compile(p, raw)?),
-            "if" => Kw::If(self.compile(p, raw)?),
-            "then" => Kw::Then(self.compile(p, raw)?),
-            "else" => Kw::Else(self.compile(p, raw)?),
-            "format" => Kw::Format(parse_raw(p, raw)?),
+            "contains" => Kw::Contains(self.compile(raw)?, raw.get().to_string()),
+            "maxContains" => Kw::MaxContains(go_int(raw, &ty("MaxContains"))?.unwrap_or(0)),
+            "minContains" => Kw::MinContains(go_int(raw, &ty("MinContains"))?.unwrap_or(0)),
+            "unevaluatedItems" => Kw::UnevaluatedItems(self.compile(raw)?),
+            "if" => Kw::If(self.compile(raw)?),
+            "then" => Kw::Then(self.compile(raw)?),
+            "else" => Kw::Else(self.compile(raw)?),
+            "format" => Kw::Format(go_string(raw, &ty("Format"))?.unwrap_or_default()),
+            // Reached through `$ref`; decoded for the errors only.
             "$defs" => {
-                // Validated for structure only; reached through `$ref`.
-                let _: BTreeMap<String, &RawValue> = parse_raw(p, raw)?;
+                self.schema_map(raw, &ty("Defs"), false)?;
                 return Ok(None);
             }
-            "$id" | "$anchor" | "$schema" | "$comment" | "title" | "description" => {
-                let _: Value = parse_raw(p, raw)?;
+            "$recursiveAnchor" => {
+                self.compile(raw)?;
                 return Ok(None);
             }
-            // Annotations, unsupported keywords (`definitions`, `dependencies`, ...) and
-            // unknown members are ignored.
+            "$schema" | "$id" | "$anchor" | "$comment" | "title" | "description" => {
+                let t = match name {
+                    "$schema" => "SchemaURI",
+                    "$id" => "ID",
+                    "$anchor" => "Anchor",
+                    "$comment" => "Comment",
+                    "title" => "Title",
+                    _ => "Description",
+                };
+                go_string(raw, &ty(t))?;
+                return Ok(None);
+            }
+            "readOnly" | "writeOnly" => {
+                let t = if name == "readOnly" {
+                    "ReadOnly"
+                } else {
+                    "WriteOnly"
+                };
+                go_bool(raw, &ty(t))?;
+                return Ok(None);
+            }
+            "examples" => {
+                for item in go_array(raw, &ty("Examples"))?.unwrap_or_default() {
+                    go_any(item)?;
+                }
+                return Ok(None);
+            }
+            "default" => {
+                go_any(raw)?;
+                return Ok(None);
+            }
+            // Unsupported keywords (`definitions`, `dependencies`, ...) and unknown members
+            // are not decoded.
             _ => return Ok(None),
         }))
     }
 
-    /// Resolves a reference inside the document; `None` when it points elsewhere.
-    fn resolve(&mut self, reference: &str) -> Result<Option<NodeId>, String> {
-        let Some(fragment) = reference.strip_prefix('#') else {
-            return Ok(None);
-        };
+    /// Resolves a reference inside the document; `None` when it points elsewhere, or to a
+    /// subschema that does not compile (its error is reported by its own keyword, or not at
+    /// all where qri-io does not decode it, as under `definitions`).
+    fn resolve(&mut self, reference: &str) -> Option<NodeId> {
+        let fragment = reference.strip_prefix('#')?;
         let pointer = if fragment.is_empty() || fragment.starts_with('/') {
             fragment.to_string()
         } else {
             let root: Value = serde_json::from_str(self.root_text).unwrap_or(Value::Null);
-            match find_anchor(&root, fragment, &mut Vec::new()) {
-                Some(p) => p,
-                None => return Ok(None),
-            }
+            find_anchor(&root, fragment, &mut Vec::new())?
         };
         if let Some(id) = self.by_pointer.get(&pointer) {
-            return Ok(Some(*id));
+            return Some(*id);
         }
-        let Some(text) = eval_pointer(self.root_text, &pointer) else {
-            return Ok(None);
-        };
+        let text = eval_pointer(self.root_text, &pointer)?;
         if pointer.is_empty() {
             // The root itself: its id is 0 once compiled.
-            return Ok(Some(0));
+            return Some(0);
         }
-        let raw: &RawValue = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let raw: &RawValue = serde_json::from_str(text).ok()?;
         // Reserve the id before compiling to support recursive references.
         let reserved = self.nodes.len();
         self.by_pointer.insert(pointer.clone(), reserved);
-        let id = self.compile("$ref", raw)?;
-        if id != reserved {
-            self.by_pointer.insert(pointer, id);
+        match self.compile(raw) {
+            Ok(id) => {
+                if id != reserved {
+                    self.by_pointer.insert(pointer, id);
+                }
+                Some(id)
+            }
+            Err(_) => {
+                self.by_pointer.remove(&pointer);
+                None
+            }
         }
-        Ok(Some(id))
     }
 }
 
 impl Schema {
     /// Compiles a schema document (`Schema.UnmarshalJSON`).
     pub fn compile(bytes: &[u8]) -> Result<Schema, String> {
-        let text = String::from_utf8_lossy(bytes).into_owned();
+        // Invalid UTF-8 and lone surrogates read as U+FFFD, as in Go.
+        let text = go_text(bytes).into_owned();
         let raw: &RawValue = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         let mut c = Compiler {
             root_text: raw.get(),
             nodes: Vec::new(),
             by_pointer: HashMap::new(),
         };
-        let root = c.compile("", raw)?;
+        let root = c.compile(raw)?;
         Ok(Schema {
             nodes: c.nodes,
             root,
@@ -530,6 +700,7 @@ impl Schema {
         };
         match &self.nodes[id] {
             Node::True | Node::Pending => {}
+            Node::Nil => st.add_error(data, "schema is nil".to_string()),
             Node::False => st.add_error(data, "schema is always false".to_string()),
             Node::Obj { kws, has_then_else } => {
                 for kw in kws {
