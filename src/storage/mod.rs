@@ -61,42 +61,49 @@ pub struct Mock {
     logger: Logger,
 }
 
-pub enum Backend {
+enum Provider {
     InMemory(InMemory),
     Mock(Mock),
     #[cfg(feature = "redis")]
     Redis(Box<redis::RedisBackend>),
 }
 
-/// The `notify event` debug log of the Go providers (`NotifyChange`), with the members of
-/// `jobbackendprovider.Event` in their Go order.
-fn debug_event(logger: &Logger, event_type: i64, id: Uuid, resource: Option<&str>) {
-    if logger.enabled(log::Level::Debug) {
-        let resource = match resource {
-            Some(r) => String::from_utf8(crate::gojson::to_vec_no_html(&r)).unwrap_or_default(),
-            None => "null".to_string(),
-        };
-        let event = log::Field {
-            key: "event".to_string(),
-            value: log::FieldValue::Json(format!(
-                "{{\"Type\":{event_type},\"JobUUID\":\"{id}\",\"Resource\":{resource}}}"
-            )),
-        };
-        logger.debug(
-            "notify event",
-            &[
-                log::s("topic", "backendProvider"),
-                log::s("method", "NotifyChange"),
-                event,
-            ],
-        );
+pub struct Backend {
+    provider: Provider,
+    /// The service logger when `jobs.logVerbosity` is 3 or more: Go's service logs each
+    /// notification it receives from the provider (`Event received`).
+    received: Option<Logger>,
+}
+
+/// `jobbackendprovider.Event` as zap reflects it (members in their Go order).
+fn event_json(event_type: i64, id: Uuid, resource: Option<&str>) -> String {
+    let resource = match resource {
+        Some(r) => String::from_utf8(crate::gojson::to_vec_no_html(&r)).unwrap_or_default(),
+        None => "null".to_string(),
+    };
+    format!("{{\"Type\":{event_type},\"JobUUID\":\"{id}\",\"Resource\":{resource}}}")
+}
+
+fn json_field(key: &str, json: &str) -> log::Field {
+    log::Field {
+        key: key.to_string(),
+        value: log::FieldValue::Json(json.to_string()),
     }
 }
 
 impl Backend {
     /// Creates the backend selected by `backend.type` (`registry.NewJobBackendProvider`), with
-    /// Go's checks and error messages.
-    pub fn create(cfg: &Config) -> Result<Backend, String> {
+    /// Go's checks and error messages; `logger` is the service logger.
+    pub fn create(cfg: &Config, logger: &Logger) -> Result<Backend, String> {
+        Ok(Backend {
+            provider: Provider::create(cfg)?,
+            received: (cfg.jobs.log_verbosity > 2).then(|| logger.clone()),
+        })
+    }
+}
+
+impl Provider {
+    fn create(cfg: &Config) -> Result<Provider, String> {
         let kind = cfg.backend.kind.as_str();
         if !matches!(kind, "mock" | "inMemory" | "redis") {
             return Err(format!(
@@ -113,7 +120,7 @@ impl Backend {
         }
         let logger = Logger::build(&cfg.backend.logger)?;
         match kind {
-            "mock" => Ok(Backend::Mock(Mock { logger })),
+            "mock" => Ok(Provider::Mock(Mock { logger })),
             "inMemory" => {
                 let m = &cfg.backend.in_memory;
                 if m.max_jobs == 0 {
@@ -131,7 +138,7 @@ impl Backend {
                     }
                     n => n as u64,
                 };
-                Ok(Backend::InMemory(InMemory {
+                Ok(Provider::InMemory(InMemory {
                     max_jobs: m.max_jobs,
                     write_frequency: Duration::from_secs(secs),
                     file: m
@@ -142,45 +149,47 @@ impl Backend {
                 }))
             }
             #[cfg(feature = "redis")]
-            _ => Ok(Backend::Redis(Box::new(redis::RedisBackend::new(
+            _ => Ok(Provider::Redis(Box::new(redis::RedisBackend::new(
                 cfg, logger,
             )?))),
             #[cfg(not(feature = "redis"))]
             _ => unreachable!("checked above"),
         }
     }
+}
 
+impl Backend {
     /// `GetType`, shown by `/api/v1/system/resources`.
     pub fn kind(&self) -> &'static str {
-        match self {
-            Backend::InMemory(_) => "InMemory",
-            Backend::Mock(_) => "Mock",
+        match &self.provider {
+            Provider::InMemory(_) => "InMemory",
+            Provider::Mock(_) => "Mock",
             #[cfg(feature = "redis")]
-            Backend::Redis(_) => "Redis",
+            Provider::Redis(_) => "Redis",
         }
     }
 
     /// Maximum number of jobs the backend accepts (Go only logged it for inMemory and never
     /// checked it for Redis; the port refuses the creation).
     pub fn max_jobs(&self) -> Option<u64> {
-        match self {
-            Backend::InMemory(m) => Some(m.max_jobs),
-            Backend::Mock(_) => None,
+        match &self.provider {
+            Provider::InMemory(m) => Some(m.max_jobs),
+            Provider::Mock(_) => None,
             #[cfg(feature = "redis")]
-            Backend::Redis(r) => Some(r.max_jobs()),
+            Provider::Redis(r) => Some(r.max_jobs()),
         }
     }
 
     /// Connects and loads the stored jobs (`Init` + `LoadJobs`).
     pub async fn load_jobs(&self) -> Result<Vec<Job>, String> {
-        match self {
-            Backend::InMemory(m) => match &m.file {
+        match &self.provider {
+            Provider::InMemory(m) => match &m.file {
                 Some(f) => f.load().await,
                 None => Ok(Vec::new()),
             },
-            Backend::Mock(_) => Ok(Vec::new()),
+            Provider::Mock(_) => Ok(Vec::new()),
             #[cfg(feature = "redis")]
-            Backend::Redis(r) => r.load_jobs().await,
+            Provider::Redis(r) => r.load_jobs().await,
         }
     }
 
@@ -188,24 +197,54 @@ impl Backend {
     /// inMemory and Redis providers from `backend.logVerbosity` 2, the mock one always (its
     /// verbosity is 4).
     fn notify_logger(&self) -> Option<&Logger> {
-        match self {
-            Backend::InMemory(m) => (m.log_verbosity >= 2).then_some(&m.logger),
-            Backend::Mock(m) => Some(&m.logger),
+        match &self.provider {
+            Provider::InMemory(m) => (m.log_verbosity >= 2).then_some(&m.logger),
+            Provider::Mock(m) => Some(&m.logger),
             #[cfg(feature = "redis")]
-            Backend::Redis(r) => (r.log_verbosity >= 2).then_some(&r.logger),
+            Provider::Redis(r) => (r.log_verbosity >= 2).then_some(&r.logger),
         }
     }
 
-    /// The `notify event` line of a job event; Go's Redis provider only notifies the
-    /// resource events.
-    fn notify_job(&self, event_type: i64, id: Uuid) {
-        #[cfg(feature = "redis")]
-        if let Backend::Redis(_) = self {
+    /// A notification of the Go provider (`NotifyChange`): its `notify event` debug line,
+    /// then the `Event received` line of the service.
+    fn notify(&self, event_type: i64, id: Uuid, resource: Option<&str>) {
+        let logger = self
+            .notify_logger()
+            .filter(|l| l.enabled(log::Level::Debug));
+        if logger.is_none() && self.received.is_none() {
             return;
         }
-        if let Some(logger) = self.notify_logger() {
-            debug_event(logger, event_type, id, None);
+        let event = event_json(event_type, id, resource);
+        if let Some(l) = logger {
+            l.debug(
+                "notify event",
+                &[
+                    log::s("topic", "backendProvider"),
+                    log::s("method", "NotifyChange"),
+                    json_field("event", &event),
+                ],
+            );
         }
+        if let Some(l) = &self.received {
+            l.info(
+                "Event received",
+                &[
+                    log::s("topic", "job"),
+                    log::s("method", "Run"),
+                    json_field("eventType", &event),
+                ],
+            );
+        }
+    }
+
+    /// The notification of a job event; Go's Redis provider only notifies the resource
+    /// events.
+    fn notify_job(&self, event_type: i64, id: Uuid) {
+        #[cfg(feature = "redis")]
+        if let Provider::Redis(_) = &self.provider {
+            return;
+        }
+        self.notify(event_type, id, None);
     }
 
     /// A job changed (called under the service lock).
@@ -213,9 +252,9 @@ impl Backend {
         if let Some(t) = go_event_type(ev) {
             self.notify_job(t, job.id);
         }
-        match self {
+        match &self.provider {
             #[cfg(feature = "redis")]
-            Backend::Redis(r) => r.on_job(job, ev),
+            Provider::Redis(r) => r.on_job(job, ev),
             _ => None,
         }
     }
@@ -225,9 +264,9 @@ impl Backend {
         if let Some(t) = go_event_type(ServiceEvent::JobDeleted) {
             self.notify_job(t, id);
         }
-        match self {
+        match &self.provider {
             #[cfg(feature = "redis")]
-            Backend::Redis(r) => r.on_job_deleted(id),
+            Provider::Redis(r) => r.on_job_deleted(id),
             _ => None,
         }
     }
@@ -235,9 +274,9 @@ impl Backend {
     /// All jobs were deleted (called under the service lock).
     pub fn on_all_deleted(&self) -> Option<Ticket> {
         self.notify_job(EVENT_ALL_JOBS_DELETED, Uuid::nil());
-        match self {
+        match &self.provider {
             #[cfg(feature = "redis")]
-            Backend::Redis(r) => r.on_all_deleted(),
+            Provider::Redis(r) => r.on_all_deleted(),
             _ => None,
         }
     }
@@ -245,46 +284,42 @@ impl Backend {
     /// A job released one of its lock resources (`OnResourceUnlocked`, called for each
     /// resource of the job, like Go).
     pub fn on_resource_unlocked(&self, id: Uuid, resource: &str) {
-        if let Some(logger) = self.notify_logger() {
-            debug_event(logger, EVENT_RESOURCE_UNLOCKED, id, Some(resource));
-        }
+        self.notify(EVENT_RESOURCE_UNLOCKED, id, Some(resource));
     }
 
     /// The admin API unlocked all resources (`OnAllResourcesUnlocked`).
     pub fn on_all_resources_unlocked(&self) {
-        if let Some(logger) = self.notify_logger() {
-            debug_event(logger, EVENT_ALL_RESOURCES_UNLOCKED, Uuid::nil(), None);
-        }
+        self.notify(EVENT_ALL_RESOURCES_UNLOCKED, Uuid::nil(), None);
     }
 
     /// Period of the snapshot saves, for backends that save snapshots.
     pub fn snapshot_interval(&self) -> Option<Duration> {
-        match self {
-            Backend::InMemory(m) if m.file.is_some() => Some(m.write_frequency),
+        match &self.provider {
+            Provider::InMemory(m) if m.file.is_some() => Some(m.write_frequency),
             _ => None,
         }
     }
 
     /// Saves a snapshot of all jobs.
     pub async fn save_snapshot(&self, jobs: Vec<Arc<Job>>) -> Result<(), String> {
-        match self {
-            Backend::InMemory(InMemory { file: Some(f), .. }) => f.save(jobs).await,
+        match &self.provider {
+            Provider::InMemory(InMemory { file: Some(f), .. }) => f.save(jobs).await,
             _ => Ok(()),
         }
     }
 
     pub async fn healthcheck(&self) -> bool {
-        match self {
+        match &self.provider {
             #[cfg(feature = "redis")]
-            Backend::Redis(r) => r.healthcheck().await,
+            Provider::Redis(r) => r.healthcheck().await,
             _ => true,
         }
     }
 
     /// Size of the storage file in bytes (`GetDiskUsage`).
     pub fn disk_usage(&self) -> u64 {
-        match self {
-            Backend::InMemory(InMemory { file: Some(f), .. }) => f.disk_usage(),
+        match &self.provider {
+            Provider::InMemory(InMemory { file: Some(f), .. }) => f.disk_usage(),
             _ => 0,
         }
     }
@@ -292,7 +327,7 @@ impl Backend {
     /// Flushes pending writes and closes connections.
     pub async fn stop(&self) {
         #[cfg(feature = "redis")]
-        if let Backend::Redis(r) = self {
+        if let Provider::Redis(r) = &self.provider {
             r.stop().await;
         }
     }

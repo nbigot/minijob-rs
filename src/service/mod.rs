@@ -195,7 +195,7 @@ impl Service {
         version: &str,
         logger: Logger,
     ) -> Result<Arc<Service>, String> {
-        let backend = Backend::create(&cfg).inspect_err(|e| {
+        let backend = Backend::create(&cfg, &logger).inspect_err(|e| {
             logger.error(
                 "Error while instantiate job service",
                 &[
@@ -569,8 +569,8 @@ impl Service {
         // Go always calls this, which also registers the topic.
         self.metrics.update_resources_locked(&job.topic, acquired);
         st.pending.remove(&OrderKey::of(&job));
-        self.transition(st, fx, id, events::ENQUEUE, ServiceEvent::JobEnqueued, now);
         self.vlog("Job enqueued", "EnqueueJob", id, &[]);
+        self.transition(st, fx, id, events::ENQUEUE, ServiceEvent::JobEnqueued, now);
         fx.wake = true;
         true
     }
@@ -597,8 +597,8 @@ impl Service {
         if acquired > 0 {
             self.metrics.update_resources_locked(&job.topic, acquired);
         }
-        self.transition(st, fx, id, events::ENQUEUE, ServiceEvent::JobEnqueued, now);
         self.vlog("Job enqueued", "RetryJob", id, &[]);
+        self.transition(st, fx, id, events::ENQUEUE, ServiceEvent::JobEnqueued, now);
         fx.wake = true;
         true
     }
@@ -682,8 +682,8 @@ impl Service {
         let now = now_ms();
         let entry = st.jobs.get_mut(&id).expect("job present");
         Arc::make_mut(entry).visibility_timeout = vt;
-        let job = self.transition(st, fx, id, events::START, ServiceEvent::JobStarted, now);
         self.vlog("Job started", "StartJob", id, &[]);
+        let job = self.transition(st, fx, id, events::START, ServiceEvent::JobStarted, now);
         Ok(job)
     }
 
@@ -816,6 +816,7 @@ impl Service {
                 }
                 Some(j) => {
                     self.unlock_job(&mut st, &j);
+                    self.vlog("Job succeeded", "SetJobAsSuccessful", id, &[]);
                     self.transition(
                         &mut st,
                         &mut fx,
@@ -824,7 +825,6 @@ impl Service {
                         ServiceEvent::JobSucceeded,
                         now_ms(),
                     );
-                    self.vlog("Job succeeded", "SetJobAsSuccessful", id, &[]);
                     self.enqueue_pending(&mut st, &mut fx);
                     Ok(())
                 }
@@ -850,6 +850,7 @@ impl Service {
                 }
                 Some(_) => {
                     let now = now_ms();
+                    self.vlog("Job canceled", "CancelJob", id, &[]);
                     self.transition(
                         &mut st,
                         &mut fx,
@@ -858,7 +859,7 @@ impl Service {
                         ServiceEvent::JobCanceled,
                         now,
                     );
-                    self.vlog("Job canceled", "CancelJob", id, &[]);
+                    self.vlog("Job enqueued", "CancelJob", id, &[]);
                     self.transition(
                         &mut st,
                         &mut fx,
@@ -867,7 +868,6 @@ impl Service {
                         ServiceEvent::JobEnqueued,
                         now_ms(),
                     );
-                    self.vlog("Job enqueued", "CancelJob", id, &[]);
                     fx.wake = true;
                     self.enqueue_pending(&mut st, &mut fx);
                     Ok(())
