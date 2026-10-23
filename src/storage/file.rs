@@ -54,12 +54,8 @@ impl<'de> serde::Deserialize<'de> for Ordered {
             fn visit_unit<E: de::Error>(self) -> Result<Ordered, E> {
                 Ok(Ordered(None))
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Ordered, A::Error> {
-                let mut e = Vec::new();
-                while let Some(k) = m.next_key::<String>()? {
-                    e.push((k, m.next_value::<serde_json::Value>()?));
-                }
-                Ok(Ordered(Some(e)))
+            fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<Ordered, A::Error> {
+                crate::gojson::decode::raw_members(m).map(|e| Ordered(Some(e)))
             }
         }
         d.deserialize_any(V)

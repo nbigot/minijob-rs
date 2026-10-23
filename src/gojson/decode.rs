@@ -2,12 +2,15 @@
 
 use serde::Deserializer;
 use serde::de::{self, MapAccess, Visitor};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 use std::fmt;
 
-/// Object members in document order, duplicates kept (Go applies them in order).
-pub type Entries = Vec<(String, Value)>;
+/// Object members in document order, duplicates kept (Go applies them in order). Values stay
+/// raw JSON: like Go, a member that has no struct field is skipped without being decoded (a
+/// number too large for a float is no error there), and integer fields see the literal.
+pub type Entries = Vec<(String, Box<RawValue>)>;
 
 /// A decoding failure. Go never exposes the message in API responses, so it is only logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +93,7 @@ pub fn parse_value(bytes: &[u8]) -> Result<Value, DecodeError> {
 }
 
 /// A top-level document decoded for a Go struct target.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Top {
     /// `null`: Go leaves the struct untouched.
     Null,
@@ -145,14 +148,19 @@ impl<'de> Visitor<'de> for TopVisitor {
         Ok(TopOrOther::Other("array"))
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut entries = Vec::new();
-        while let Some(key) = map.next_key::<String>()? {
-            let value: Value = map.next_value()?;
-            entries.push((key, value));
-        }
-        Ok(TopOrOther::Top(Top::Object(entries)))
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        Ok(TopOrOther::Top(Top::Object(raw_members(map)?)))
     }
+}
+
+/// The members of an object, values raw.
+pub fn raw_members<'de, A: MapAccess<'de>>(mut map: A) -> Result<Entries, A::Error> {
+    let mut entries = Vec::new();
+    while let Some(key) = map.next_key::<String>()? {
+        let value: Box<RawValue> = map.next_value()?;
+        entries.push((key, value));
+    }
+    Ok(entries)
 }
 
 /// Decodes a document that Go decodes into a struct of type `go_type`.
@@ -205,79 +213,69 @@ pub fn match_field(key: &str, fields: &[&str]) -> Option<usize> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeMismatch;
 
+/// A raw member decoded as a Go `interface{}`; numbers out of range are errors, as in Go.
+fn value_of(raw: &RawValue) -> Result<Value, TypeMismatch> {
+    serde_json::from_str(raw.get()).map_err(|_| TypeMismatch)
+}
+
 /// `null` leaves a string unchanged; any other non-string is an error.
-pub fn set_string(v: &Value, out: &mut String) -> Result<(), TypeMismatch> {
-    match v {
+pub fn set_string(raw: &RawValue, out: &mut String) -> Result<(), TypeMismatch> {
+    match value_of(raw)? {
         Value::Null => Ok(()),
         Value::String(s) => {
-            out.clone_from(s);
+            *out = s;
             Ok(())
         }
         _ => Err(TypeMismatch),
     }
 }
 
-/// Integer value of a JSON number literal as Go's `strconv.ParseInt` accepts it.
-fn as_go_i64(v: &Value) -> Result<Option<i64>, TypeMismatch> {
-    match v {
-        Value::Null => Ok(None),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(Some(i))
-            } else if let Some(f) = n.as_f64().filter(|_| !n.is_u64()) {
-                // serde_json turns the literal `-0` into a float; Go reads it as 0.
-                if f == 0.0 && f.is_sign_negative() {
-                    Ok(Some(0))
-                } else {
-                    Err(TypeMismatch)
-                }
-            } else {
-                Err(TypeMismatch)
-            }
-        }
+/// The literal of a number member as Go's decoder hands it to `strconv.ParseInt` or
+/// `ParseUint`: `None` for `null`; any other JSON value is an error.
+fn number_literal(raw: &RawValue) -> Result<Option<&str>, TypeMismatch> {
+    match raw.get() {
+        "null" => Ok(None),
+        t if t.starts_with(|c: char| c == '-' || c.is_ascii_digit()) => Ok(Some(t)),
         _ => Err(TypeMismatch),
     }
 }
 
-/// Signed integer with Go's overflow check for the target size.
-pub fn set_int<T: TryFrom<i64>>(v: &Value, out: &mut T) -> Result<(), TypeMismatch> {
-    if let Some(i) = as_go_i64(v)? {
+/// Signed integer: `strconv.ParseInt(literal, 10, 64)` (`-0` is 0, `1.0`, `1e2` and `-0.0`
+/// are errors), then Go's overflow check for the target size.
+pub fn set_int<T: TryFrom<i64>>(raw: &RawValue, out: &mut T) -> Result<(), TypeMismatch> {
+    if let Some(t) = number_literal(raw)? {
+        let digits = t.strip_prefix('-').unwrap_or(t);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(TypeMismatch);
+        }
+        let i: i64 = t.parse().map_err(|_| TypeMismatch)?;
         *out = T::try_from(i).map_err(|_| TypeMismatch)?;
     }
     Ok(())
 }
 
-/// Unsigned integer (Go `uint`, 64 bits).
-pub fn set_uint(v: &Value, out: &mut u64) -> Result<(), TypeMismatch> {
-    match v {
-        Value::Null => Ok(()),
-        Value::Number(n) => match n.as_u64() {
-            Some(u) => {
-                *out = u;
-                Ok(())
-            }
-            None => match n.as_f64() {
-                Some(f) if f == 0.0 && f.is_sign_negative() => {
-                    *out = 0;
-                    Ok(())
-                }
-                _ => Err(TypeMismatch),
-            },
-        },
-        _ => Err(TypeMismatch),
+/// Unsigned integer (Go `uint`, 64 bits): `strconv.ParseUint(literal, 10, 64)`, so `-0` is an
+/// error.
+pub fn set_uint(raw: &RawValue, out: &mut u64) -> Result<(), TypeMismatch> {
+    if let Some(t) = number_literal(raw)? {
+        if !t.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(TypeMismatch);
+        }
+        *out = t.parse().map_err(|_| TypeMismatch)?;
     }
+    Ok(())
 }
 
 /// `[]string`: `null` sets nil, elements that are `null` become `""`.
-pub fn set_string_slice(v: &Value, out: &mut Option<Vec<String>>) -> Result<(), TypeMismatch> {
-    match v {
-        Value::Null => {
+pub fn set_string_slice(raw: &RawValue, out: &mut Option<Vec<String>>) -> Result<(), TypeMismatch> {
+    match items(raw)? {
+        None => {
             *out = None;
             Ok(())
         }
-        Value::Array(items) => {
+        Some(items) => {
             let mut list = Vec::with_capacity(items.len());
-            for item in items {
+            for item in &items {
                 let mut s = String::new();
                 set_string(item, &mut s)?;
                 list.push(s);
@@ -285,26 +283,21 @@ pub fn set_string_slice(v: &Value, out: &mut Option<Vec<String>>) -> Result<(), 
             *out = Some(list);
             Ok(())
         }
-        _ => Err(TypeMismatch),
     }
 }
 
 /// `map[string]interface{}`: `null` sets nil; an object is merged into an existing map, as Go
 /// reuses a non-nil map.
-pub fn set_map(v: &Value, out: &mut Option<Map<String, Value>>) -> Result<(), TypeMismatch> {
-    match v {
+pub fn set_map(raw: &RawValue, out: &mut Option<Map<String, Value>>) -> Result<(), TypeMismatch> {
+    match value_of(raw)? {
         Value::Null => {
             *out = None;
             Ok(())
         }
         Value::Object(obj) => {
             match out {
-                Some(existing) => {
-                    for (k, val) in obj {
-                        existing.insert(k.clone(), val.clone());
-                    }
-                }
-                None => *out = Some(obj.clone()),
+                Some(existing) => existing.extend(obj),
+                None => *out = Some(obj),
             }
             Ok(())
         }
@@ -312,13 +305,32 @@ pub fn set_map(v: &Value, out: &mut Option<Map<String, Value>>) -> Result<(), Ty
     }
 }
 
-/// Members of a nested object value (sorted, duplicates already collapsed by serde_json).
-pub fn entries_of(v: &Value) -> Result<Option<Entries>, TypeMismatch> {
-    match v {
-        Value::Null => Ok(None),
-        Value::Object(obj) => Ok(Some(
-            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        )),
+/// Members of a nested object (in order, duplicates kept); `None` for `null`.
+pub fn members(raw: &RawValue) -> Result<Option<Entries>, TypeMismatch> {
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<Entries>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an object or null")
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            raw_members(map).map(Some)
+        }
+    }
+    let mut de = serde_json::Deserializer::from_str(raw.get());
+    (&mut de).deserialize_any(V).map_err(|_| TypeMismatch)
+}
+
+/// Elements of a nested array; `None` for `null`.
+pub fn items(raw: &RawValue) -> Result<Option<Vec<Box<RawValue>>>, TypeMismatch> {
+    match raw.get().as_bytes().first() {
+        Some(b'[') => serde_json::from_str(raw.get())
+            .map(Some)
+            .map_err(|_| TypeMismatch),
+        _ if raw.get() == "null" => Ok(None),
         _ => Err(TypeMismatch),
     }
 }
@@ -330,7 +342,7 @@ mod tests {
 
     #[test]
     fn top_level() {
-        assert_eq!(parse_top(b" null ", "T").unwrap(), Top::Null);
+        assert!(matches!(parse_top(b" null ", "T").unwrap(), Top::Null));
         assert!(parse_top(b"[1]", "T").is_err());
         assert!(parse_top(b"{} x", "T").is_err());
         assert!(parse_top(b"", "T").is_err());
@@ -338,7 +350,7 @@ mod tests {
             panic!()
         };
         assert_eq!(e.len(), 3);
-        assert_eq!(e[2], ("a".to_string(), json!(3)));
+        assert_eq!((e[2].0.as_str(), e[2].1.get()), ("a", "3"));
     }
 
     #[test]
@@ -346,7 +358,7 @@ mod tests {
         let Top::Object(e) = parse_top(b"{\"topic\":\"a\xffb\"}", "T").unwrap() else {
             panic!()
         };
-        assert_eq!(e[0].1, json!("a\u{FFFD}b"));
+        assert_eq!(value_of(&e[0].1).unwrap(), json!("a\u{FFFD}b"));
     }
 
     #[test]
@@ -360,23 +372,56 @@ mod tests {
         assert_eq!(match_field("topi", &fields), None);
     }
 
+    fn raw(s: &str) -> Box<RawValue> {
+        RawValue::from_string(s.to_string()).unwrap()
+    }
+
+    /// Integers are read from the literal, like `strconv.ParseInt` / `ParseUint` in Go.
     #[test]
     fn integers_like_go() {
         let mut p: i8 = 5;
-        set_int(&json!(null), &mut p).unwrap();
+        set_int(&raw("null"), &mut p).unwrap();
         assert_eq!(p, 5);
-        set_int(&json!(-128), &mut p).unwrap();
+        set_int(&raw("-128"), &mut p).unwrap();
         assert_eq!(p, -128);
-        assert!(set_int(&json!(200), &mut p).is_err());
-        assert!(set_int(&json!(1.5), &mut p).is_err());
-        assert!(set_int(&json!("1"), &mut p).is_err());
-        let v: Value = serde_json::from_str("-0").unwrap();
-        set_int(&v, &mut p).unwrap();
+        set_int(&raw("-0"), &mut p).unwrap();
         assert_eq!(p, 0);
+        for bad in [
+            "200", "1.5", "1.0", "1e2", "-0.0", "-0e0", "\"1\"", "true", "[]", "{}",
+        ] {
+            assert!(set_int(&raw(bad), &mut p).is_err(), "{bad}");
+        }
+        let mut i = 0i64;
+        set_int(&raw("-9223372036854775808"), &mut i).unwrap();
+        assert_eq!(i, i64::MIN);
+        assert!(set_int(&raw("9223372036854775808"), &mut i).is_err());
         let mut u = 0u64;
-        assert!(set_uint(&json!(-1), &mut u).is_err());
-        set_uint(&json!(u64::MAX), &mut u).unwrap();
+        set_uint(&raw("18446744073709551615"), &mut u).unwrap();
         assert_eq!(u, u64::MAX);
+        for bad in ["-1", "-0", "1.0", "18446744073709551616", "\"1\""] {
+            assert!(set_uint(&raw(bad), &mut u).is_err(), "{bad}");
+        }
+    }
+
+    /// A member without struct field is not decoded: a number out of float range is no error.
+    #[test]
+    fn unknown_members_are_not_decoded() {
+        let Top::Object(e) = parse_top(br#"{"x":1e400,"y":{"z":[-1e999]}}"#, "T").unwrap() else {
+            panic!()
+        };
+        assert_eq!(e[0].1.get(), "1e400");
+        let mut s = String::new();
+        assert!(set_string(&e[0].1, &mut s).is_err());
+        let mut m = None;
+        assert!(set_map(&raw(r#"{"a":1e400}"#), &mut m).is_err());
+        // Nested members keep their order and duplicates.
+        let m = members(&raw(r#"{"b":1,"a":2,"b":3}"#)).unwrap().unwrap();
+        let keys: Vec<&str> = m.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["b", "a", "b"]);
+        assert!(members(&raw("null")).unwrap().is_none());
+        assert!(members(&raw("[]")).is_err());
+        assert!(items(&raw("{}")).is_err());
+        assert_eq!(items(&raw("[1, \"x\"]")).unwrap().unwrap().len(), 2);
     }
 
     #[test]
@@ -415,14 +460,14 @@ mod tests {
     #[test]
     fn maps_merge_and_slices() {
         let mut m = None;
-        set_map(&json!({"a": 1}), &mut m).unwrap();
-        set_map(&json!({"b": 2}), &mut m).unwrap();
+        set_map(&raw(r#"{"a": 1}"#), &mut m).unwrap();
+        set_map(&raw(r#"{"b": 2}"#), &mut m).unwrap();
         assert_eq!(Value::Object(m.clone().unwrap()), json!({"a": 1, "b": 2}));
-        set_map(&json!(null), &mut m).unwrap();
+        set_map(&raw("null"), &mut m).unwrap();
         assert!(m.is_none());
         let mut s = None;
-        set_string_slice(&json!(["x", null]), &mut s).unwrap();
+        set_string_slice(&raw(r#"["x", null]"#), &mut s).unwrap();
         assert_eq!(s, Some(vec!["x".to_string(), String::new()]));
-        assert!(set_string_slice(&json!([1]), &mut s).is_err());
+        assert!(set_string_slice(&raw("[1]"), &mut s).is_err());
     }
 }
