@@ -698,6 +698,12 @@ impl Schema {
             st.add_error(data, "schema is nil".to_string());
             return;
         };
+        // A `$ref` that comes back to a schema being evaluated on the same value, without
+        // going into it (`{"$ref": "#"}`), loops forever: qri-io recursed until the stack
+        // overflowed. The loop adds no constraint, so it is skipped.
+        let Some(_active) = Active::enter(id, data) else {
+            return;
+        };
         match &self.nodes[id] {
             Node::True | Node::Pending => {}
             Node::Nil => st.add_error(data, "schema is nil".to_string()),
@@ -1197,6 +1203,38 @@ impl Schema {
                 }
             }
         }
+    }
+}
+
+thread_local! {
+    /// The schemas being evaluated, with the address of their value (validation is
+    /// synchronous: it runs on one thread from start to end).
+    static ACTIVE: RefCell<Vec<(NodeId, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A schema under evaluation on a value; leaves the list when dropped.
+struct Active;
+
+impl Active {
+    /// `None` when the schema is already being evaluated on this very value.
+    fn enter(id: NodeId, data: &Value) -> Option<Active> {
+        let key = (id, data as *const Value as usize);
+        ACTIVE.with(|a| {
+            let mut a = a.borrow_mut();
+            if a.contains(&key) {
+                return None;
+            }
+            a.push(key);
+            Some(Active)
+        })
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        ACTIVE.with(|a| {
+            a.borrow_mut().pop();
+        });
     }
 }
 
@@ -2173,5 +2211,42 @@ mod tests {
     fn schema_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Schema>();
+    }
+
+    /// A `$ref` coming back to its own schema on the same value overflowed the stack (Go
+    /// too); the loop adds no constraint. Recursion through the document still works.
+    #[test]
+    fn self_referencing_refs_end() {
+        let validate = |schema: &str, data: Value| {
+            msgs(&Schema::compile(schema.as_bytes()).unwrap().validate(&data))
+        };
+        for schema in [
+            r##"{"$ref": "#"}"##,
+            r#"{"$ref": ""}"#,
+            r#"{"$ref": null}"#,
+            r##"{"$defs": {"a": {"$ref": "#/$defs/a"}}, "$ref": "#/$defs/a"}"##,
+            r##"{"$ref": "#/properties/a", "properties": {"a": {"$ref": "#/properties/a"}}}"##,
+            r##"{"allOf": [{"$ref": "#"}], "anyOf": [{"$ref": "#"}]}"##,
+        ] {
+            validate(schema, json!({"a": 1}));
+        }
+        assert_eq!(
+            validate(r##"{"$ref": "#", "type": "object"}"##, json!(1)),
+            [(
+                "/".to_string(),
+                "type should be object, got integer".to_string(),
+                "1".to_string()
+            )]
+        );
+        let tree =
+            r##"{"type": "object", "required": ["n"], "properties": {"child": {"$ref": "#"}}}"##;
+        assert_eq!(
+            validate(tree, json!({"n": 1, "child": {"n": 2, "child": {}}})),
+            [(
+                "/child/child".to_string(),
+                "\"n\" value is required".to_string(),
+                "map[]".to_string()
+            )]
+        );
     }
 }
