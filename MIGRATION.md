@@ -211,6 +211,11 @@ Redis:
 - Same messages and fields. When the admin API stops the server, `Service stopped` comes
   after `Server stopped`: the job service stops once the HTTP server has finished (Go stopped
   it first, while requests were still accepted).
+- When the server cannot start (`Cannot initialize server`: schema file, CORS origins,
+  Consul registration), the job service has not started, so there are no `Service started`
+  and `Service stopped` lines (Go started it first).
+- A failed request to the Consul agent gives its cause in other words
+  (`Put "<url>": tcp connect error: ...`; Go: `Put "<url>": dial tcp ...`).
 
 ## Docker image
 

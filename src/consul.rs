@@ -111,8 +111,9 @@ impl Consul {
         })
     }
 
-    fn request(&self, path: &str, token: &str) -> reqwest::RequestBuilder {
-        let mut req = self.client.put(format!("{}{path}", self.base));
+    fn request(&self, path: &str, token: &str) -> (String, reqwest::RequestBuilder) {
+        let url = format!("{}{path}", self.base);
+        let mut req = self.client.put(&url);
         let token = if token.is_empty() {
             &self.env_token
         } else {
@@ -124,11 +125,16 @@ impl Consul {
         if let Some((u, p)) = &self.auth {
             req = req.basic_auth(u, Some(p));
         }
-        req
+        (url, req)
     }
 
-    async fn send(req: reqwest::RequestBuilder) -> Result<(), String> {
-        let resp = req.send().await.map_err(|e| e.to_string())?;
+    /// Sends a request; errors are worded like the Go client's (`Put "<url>": <cause>`,
+    /// `Unexpected response code: 500 (<body>)`).
+    async fn send((url, req): (String, reqwest::RequestBuilder)) -> Result<(), String> {
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| crate::httperr::url_error("Put", &url, &crate::httperr::cause(&e)))?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
@@ -162,11 +168,11 @@ impl Consul {
         if c.server.replace_existing_checks {
             path.push_str("?replace-existing-checks=true");
         }
-        let req = self
-            .request(&path, &c.server.token)
+        let (url, req) = self.request(&path, &c.server.token);
+        let req = req
             .header("Content-Type", "application/json")
             .body(crate::gojson::to_vec(&reg));
-        match Self::send(req).await {
+        match Self::send((url, req)).await {
             Ok(()) => {
                 self.logger.info(
                     "Consul service registered",
@@ -279,5 +285,86 @@ mod tests {
             "{line}"
         );
         assert_eq!(token, "secret");
+    }
+
+    /// A Consul agent that answers each request with `response`, or closes the connection.
+    async fn failing_agent(response: Option<&'static [u8]>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let mut chunk = [0u8; 4096];
+                let _ = tcp.read(&mut chunk).await;
+                if let Some(r) = response {
+                    let _ = tcp.write_all(r).await;
+                }
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn errors_like_go() {
+        let mut cfg = ConsulConfig::default();
+        cfg.server.replace_existing_checks = true;
+        let consul = |addr: String| {
+            Consul::with_env(&cfg, Logger::nop(), move |name: &str| match name {
+                "CONSUL_HTTP_ADDR" => addr.clone(),
+                _ => String::new(),
+            })
+            .unwrap()
+        };
+        let addr = failing_agent(Some(
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 6\r\nConnection: close\r\n\r\nboom\n\n",
+        ))
+        .await;
+        let c = consul(addr);
+        assert_eq!(
+            c.register().await.unwrap_err(),
+            "Unexpected response code: 500 (boom)"
+        );
+        c.deregister().await;
+        let addr = failing_agent(None).await;
+        let e = consul(addr.clone()).register().await.unwrap_err();
+        let url = format!("http://{addr}/v1/agent/service/register?replace-existing-checks=true");
+        assert!(e.starts_with(&format!("Put \"{url}\": ")), "{e}");
+        assert!(!e.contains("error sending request"), "{e}");
+    }
+
+    #[test]
+    fn environment() {
+        let with = |vars: &'static [(&'static str, &'static str)]| {
+            Consul::with_env(&ConsulConfig::default(), Logger::nop(), |name: &str| {
+                vars.iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_default()
+            })
+        };
+        assert_eq!(with(&[]).unwrap().base, "http://127.0.0.1:8500");
+        let c = with(&[
+            ("CONSUL_HTTP_ADDR", "consul:8501"),
+            ("CONSUL_HTTP_SSL", "TRUE"),
+            ("CONSUL_HTTP_SSL_VERIFY", "false"),
+            ("CONSUL_HTTP_AUTH", "user:pw"),
+        ])
+        .unwrap();
+        assert_eq!(c.base, "https://consul:8501");
+        assert_eq!(c.auth, Some(("user".into(), "pw".into())));
+        let c = with(&[
+            ("CONSUL_HTTP_ADDR", "http://consul:8500/"),
+            ("CONSUL_HTTP_AUTH", "user"),
+        ])
+        .unwrap();
+        assert_eq!(c.base, "http://consul:8500");
+        assert_eq!(c.auth, Some(("user".into(), String::new())));
+        assert_eq!(
+            with(&[("CONSUL_HTTP_ADDR", "unix:///run/consul.sock")])
+                .err()
+                .unwrap(),
+            "Consul unix sockets are not supported: /run/consul.sock"
+        );
+        let e = with(&[("CONSUL_CACERT", "missing-ca.pem")]).err().unwrap();
+        assert!(e.starts_with("open missing-ca.pem: "), "{e}");
     }
 }
