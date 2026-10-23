@@ -17,6 +17,9 @@ version that are fixed here; the few deliberate behavior changes are marked **(c
   Floats are written like Go (`1.0` → `1`, `1e-7`).
 - The jobs file is replaced atomically (temporary file, then rename). A crash during a save
   no longer leaves a truncated file that prevents the next start.
+- A periodic save that fails (disk full, permissions) is logged (`Can't save json to file`)
+  and tried again at the next one; Go logged it as fatal and exited, losing the jobs since
+  the previous save.
 - The final save always happens when the server stops. In Go, a change made during a
   periodic save could be skipped by the final save, and `docker stop` could kill the server
   before it (long polls delayed the shutdown).

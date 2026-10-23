@@ -4,6 +4,7 @@
 //! Unlike Go, the file is replaced atomically (temporary file, fsync, rename), so a crash
 //! during a save cannot leave a truncated file.
 
+use crate::config::{go_open_error, go_path_error};
 use crate::gojson::decode::{Entries, match_field};
 use crate::log::{self, Logger};
 use crate::model::{Job, serialize_uuid_map};
@@ -146,13 +147,16 @@ impl JobsFile {
         let logger = self.logger.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Job>, String> {
             if !directory.as_os_str().is_empty() && !directory.exists() {
-                std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(&directory)
+                    .map_err(|e| go_path_error("mkdir", &directory.display().to_string(), &e))?;
             }
             if !path.exists() {
-                write_atomic(&path, &encode(&[]))?;
+                write_atomic(&path, &encode(&[]))
+                    .inspect_err(|e| save_failed(&logger, &path, e))?;
                 return Ok(Vec::new());
             }
-            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let bytes =
+                std::fs::read(&path).map_err(|e| go_open_error(&path.display().to_string(), &e))?;
             decode(&bytes).inspect_err(|e| {
                 logger.error(
                     "Can't decode json stream",
@@ -175,17 +179,7 @@ impl JobsFile {
         let logger = self.logger.clone();
         tokio::task::spawn_blocking(move || {
             let bytes = encode(&jobs);
-            write_atomic(&path, &bytes).inspect_err(|e| {
-                logger.error(
-                    "Can't save json to file",
-                    &[
-                        log::s("topic", "DBFileStorage"),
-                        log::s("method", "Save"),
-                        log::s("filename", path.display().to_string()),
-                        log::err(e),
-                    ],
-                );
-            })
+            write_atomic(&path, &bytes).inspect_err(|e| save_failed(&logger, &path, e))
         })
         .await
         .map_err(|e| e.to_string())?
@@ -210,21 +204,38 @@ impl JobsFile {
     }
 }
 
-/// Replaces `path` with `bytes`: temporary file in the same directory, fsync, rename.
+/// A failed save is logged (Go logged it as fatal and exited; the next save tries again).
+fn save_failed(logger: &Logger, path: &std::path::Path, e: &str) {
+    logger.error(
+        "Can't save json to file",
+        &[
+            log::s("topic", "DBFileStorage"),
+            log::s("method", "Save"),
+            log::s("filename", path.display().to_string()),
+            log::err(e),
+        ],
+    );
+}
+
+/// Replaces `path` with `bytes`: temporary file in the same directory, fsync, rename. Errors
+/// are worded like Go's (`open <path>: ...`), which wrote the file in place.
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let write = || -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+    let shown = path.display().to_string();
+    let write = || -> Result<(), String> {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| go_open_error(&shown, &e))?;
+        f.write_all(bytes)
+            .map_err(|e| go_path_error("write", &shown, &e))?;
+        f.sync_all()
+            .map_err(|e| go_path_error("sync", &shown, &e))?;
         drop(f);
         std::fs::rename(&tmp, path)
+            .map_err(|e| go_path_error("rename", &format!("{} {shown}", tmp.display()), &e))
     };
-    write().map_err(|e| {
+    write().inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
-        e.to_string()
     })
 }
 
@@ -284,5 +295,51 @@ mod tests {
         write_atomic(&p, b"{\"jobs\":{}}").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"{\"jobs\":{}}");
         assert!(!dir.path().join("jobs.json.tmp").exists());
+    }
+
+    /// Creates the directory and an empty file, then reads it back; I/O errors are worded
+    /// like Go's `*PathError`.
+    #[tokio::test]
+    async fn load_save_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a").join("b");
+        let f = JobsFile::new(sub.to_str().unwrap(), "jobs.json", Logger::nop());
+        assert_eq!(f.disk_usage(), 0);
+        assert!(f.load().await.unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(sub.join("jobs.json")).unwrap(),
+            b"{\"jobs\":{}}"
+        );
+        assert_eq!(f.disk_usage(), 11);
+        let job = Arc::new(Job {
+            topic: "t".into(),
+            ..Default::default()
+        });
+        f.save(vec![job.clone()]).await.unwrap();
+        let loaded = f.load().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].topic, "t");
+        // A file where the directory should be.
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let f = JobsFile::new(file.to_str().unwrap(), "jobs.json", Logger::nop());
+        let path = file.join("jobs.json").display().to_string();
+        let e = f.load().await.unwrap_err();
+        assert!(e.starts_with(&format!("open {path}: ")), "{e}");
+        let e = f.save(vec![job]).await.unwrap_err();
+        assert!(e.starts_with(&format!("open {path}: ")), "{e}");
+        let f = JobsFile::new(
+            file.join("sub").to_str().unwrap(),
+            "jobs.json",
+            Logger::nop(),
+        );
+        let e = f.load().await.unwrap_err();
+        assert!(e.starts_with("mkdir "), "{e}");
+        // Not JSON.
+        let bad = dir.path().join("bad");
+        std::fs::create_dir(&bad).unwrap();
+        std::fs::write(bad.join("jobs.json"), "{").unwrap();
+        let f = JobsFile::new(bad.to_str().unwrap(), "jobs.json", Logger::nop());
+        assert!(f.load().await.is_err());
     }
 }

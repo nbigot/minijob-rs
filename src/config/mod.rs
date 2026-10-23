@@ -395,6 +395,11 @@ pub fn parse(text: &str) -> Result<Config, String> {
 
 /// Go's message for an OS error: `open <path>: <description>` without Rust's `(os error N)`.
 pub fn go_open_error(path: &str, err: &std::io::Error) -> String {
+    go_path_error("open", path, err)
+}
+
+/// A Go `*fs.PathError` message: `<op> <path>: <description>` (`mkdir`, `open`, `write`...).
+pub fn go_path_error(op: &str, path: &str, err: &std::io::Error) -> String {
     let mut msg = err.to_string();
     if let Some(i) = msg.find(" (os error ") {
         msg.truncate(i);
@@ -406,7 +411,7 @@ pub fn go_open_error(path: &str, err: &std::io::Error) -> String {
             msg = first.to_lowercase().collect::<String>() + c.as_str();
         }
     }
-    format!("open {path}: {msg}")
+    format!("{op} {path}: {msg}")
 }
 
 /// Loads the configuration file (`config.LoadConfig`). The error text is printed by `main`.
