@@ -176,6 +176,9 @@ Redis:
   at that moment. Go built the payload later (a canceled job was usually reported `queued`)
   and resent the callbacks of every completed job after each restart.
 - At most 256 callbacks are sent at the same time.
+- `Callback failed` errors are Go's for a URL Go refuses (`parse ...`, `unsupported protocol
+  scheme`, `no Host in request URL`); a network error gives its cause in other words
+  (`tcp connect error: ...`, `dns error: ...`; Go: `dial tcp ...`).
 - The JSON schema of the `standard` and `docker` templates (`schema.json`) lists
   `callbackUrl`. The Go schema did not and refuses additional properties, so with schema
   validation enabled every job with a callback was rejected; add `callbackUrl` to a schema
