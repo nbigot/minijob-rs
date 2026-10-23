@@ -1,9 +1,10 @@
 use crate::gojson::decode::{
-    self, DecodeError, Entries, Top, TypeMismatch, entries_of, match_field, set_int, set_map,
+    self, DecodeError, Entries, Top, TypeMismatch, items, match_field, members, set_int, set_map,
     set_string, set_string_slice, set_uint,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -329,44 +330,36 @@ impl Job {
     }
 }
 
-fn set_uuid(v: &Value, out: &mut Uuid) -> Result<(), TypeMismatch> {
-    match v {
-        Value::Null => Ok(()),
-        Value::String(s) => {
-            *out = crate::model::uuid::parse_go(s).map_err(|_| TypeMismatch)?;
-            Ok(())
-        }
-        _ => Err(TypeMismatch),
+fn set_uuid(raw: &RawValue, out: &mut Uuid) -> Result<(), TypeMismatch> {
+    if raw.get() == "null" {
+        return Ok(());
     }
+    let mut s = String::new();
+    set_string(raw, &mut s)?;
+    *out = crate::model::uuid::parse_go(&s).map_err(|_| TypeMismatch)?;
+    Ok(())
 }
 
-fn set_history(v: &Value, out: &mut Vec<HistoryEvent>) -> Result<(), TypeMismatch> {
+fn set_history(raw: &RawValue, out: &mut Vec<HistoryEvent>) -> Result<(), TypeMismatch> {
     const FIELDS: [&str; 2] = ["eventType", "timestamp"];
-    match v {
-        Value::Null => {
-            out.clear();
-            Ok(())
-        }
-        Value::Array(items) => {
-            let mut list = Vec::with_capacity(items.len());
-            for item in items {
-                let mut ev = HistoryEvent::default();
-                if let Some(entries) = entries_of(item)? {
-                    for (k, val) in &entries {
-                        match match_field(k, &FIELDS) {
-                            Some(0) => set_string(val, &mut ev.event_type)?,
-                            Some(_) => set_int(val, &mut ev.timestamp)?,
-                            None => {}
-                        }
-                    }
-                }
-                list.push(ev);
+    let Some(items) = items(raw)? else {
+        out.clear();
+        return Ok(());
+    };
+    let mut list = Vec::with_capacity(items.len());
+    for item in &items {
+        let mut ev = HistoryEvent::default();
+        for (k, val) in members(item)?.iter().flatten() {
+            match match_field(k, &FIELDS) {
+                Some(0) => set_string(val, &mut ev.event_type)?,
+                Some(_) => set_int(val, &mut ev.timestamp)?,
+                None => {}
             }
-            *out = list;
-            Ok(())
         }
-        _ => Err(TypeMismatch),
+        list.push(ev);
     }
+    *out = list;
+    Ok(())
 }
 
 /// A UUID serialized as Go does (lowercase, hyphenated).

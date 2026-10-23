@@ -126,6 +126,22 @@ mod tests {
         assert!(JobRequest::decode(br#"{"topic":"a"} {}"#).is_err());
         let r = JobRequest::decode(br#"{"topic":"a","topic":null}"#).unwrap();
         assert_eq!(r.topic, "a");
+        // Members without field are skipped undecoded, as by Go: no float overflow error.
+        let r = JobRequest::decode(br#"{"id":1e400,"x":{"y":[-1e999]},"topic":"t"}"#).unwrap();
+        assert_eq!(r.topic, "t");
+        assert!(JobRequest::decode(br#"{"properties":{"a":1e400}}"#).is_err());
+        // Integers are parsed from the literal (`strconv.ParseInt`).
+        assert_eq!(
+            JobRequest::decode(br#"{"priority":-0}"#).unwrap().priority,
+            0
+        );
+        for bad in [
+            r#"{"priority":-0.0}"#,
+            r#"{"startAfter":1e3}"#,
+            r#"{"delay":1.0}"#,
+        ] {
+            assert!(JobRequest::decode(bad.as_bytes()).is_err(), "{bad}");
+        }
     }
 
     #[test]
