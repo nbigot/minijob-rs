@@ -298,22 +298,14 @@ fn is_json_content_type(v: &str) -> bool {
         .eq_ignore_ascii_case("application/json")
 }
 
-/// Fiber `getSplicedStrList`: the codings of a `Content-Encoding` value, split on commas, with
-/// leading spaces removed. Fiber keeps the end of the previous element in a `uint8`, so past
-/// 255 bytes the elements start at a wrapped offset; that is reproduced.
-fn fiber_codings(value: &str) -> Vec<String> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::new();
-    let mut last: u8 = 0;
-    for (index, c) in value.char_indices().chain([(value.len(), '$')]) {
-        if c == ',' || index == value.len() {
-            let element = &bytes[usize::from(last)..index];
-            let start = element.iter().take_while(|&&b| b == b' ').count();
-            out.push(String::from_utf8_lossy(&element[start..]).into_owned());
-            last = (index + 1) as u8;
-        }
-    }
-    out
+/// The codings of a `Content-Encoding` value, split on commas, with leading spaces removed
+/// (Go v1.1.2 `DecodedBody`; Fiber's `getSplicedStrList` kept its offsets in a `uint8`, which
+/// wrapped past 255 bytes).
+fn codings(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(|c| c.trim_start_matches(' '))
+        .collect()
 }
 
 /// Decodes a brotli stream into `out` (stopping at `max` bytes). As with Go's reader, data
@@ -355,7 +347,8 @@ fn unbrotli(input: &[u8], out: &mut Vec<u8>, max: u64) -> Result<(), String> {
     }
 }
 
-/// Fiber `c.Body()`: decodes the `Content-Encoding` of the last such header, in the order
+/// Go `DecodedBody` (Fiber's `c.Body()` with a limit): decodes the `Content-Encoding` of the
+/// last such header, in the order
 /// listed (Fiber does not reverse it), with the names `gzip`, `deflate`, `br` and `brotli`
 /// (case-sensitive). A single unknown coding leaves the body as is; an unknown coding after
 /// others ends the decoding with what was decoded so far (nothing if it comes first, giving
@@ -378,11 +371,11 @@ fn decoded_body(req: &Req) -> Option<Vec<u8>> {
     if header.is_empty() {
         return Some(body);
     }
-    let codings = fiber_codings(&header);
+    let codings = codings(&header);
     let mut decoded: Option<Vec<u8>> = None;
     for coding in &codings {
         let mut out = Vec::new();
-        let result = match coding.as_str() {
+        let result = match *coding {
             "gzip" => flate2::read::MultiGzDecoder::new(&body[..])
                 .take(max)
                 .read_to_end(&mut out)
@@ -1142,15 +1135,19 @@ mod tests {
     }
 
     #[test]
-    fn codings_split_like_fiber() {
-        assert_eq!(fiber_codings("gzip"), ["gzip"]);
-        assert_eq!(fiber_codings(" gzip , br,,"), ["gzip ", "br", "", ""]);
-        assert_eq!(fiber_codings("\tgzip"), ["\tgzip"]);
-        // Fiber's uint8 offset wraps after 255 bytes.
+    fn codings_split_like_go() {
+        assert_eq!(codings("gzip"), ["gzip"]);
+        assert_eq!(codings(" gzip , br,,"), ["gzip ", "br", "", ""]);
+        assert_eq!(codings("\tgzip"), ["\tgzip"]);
+        // No wrap after 255 bytes (Fiber's uint8 offset did).
         let long = format!("{}gzip", "x,".repeat(140));
-        // The last comma is at 279, 280 wraps to 24.
-        assert_eq!(fiber_codings(&long).last().unwrap(), &long[24..]);
-        assert_eq!(fiber_codings(&long)[127], "x");
+        assert_eq!(codings(&long).len(), 141);
+        assert_eq!(codings(&long).last().unwrap(), &"gzip");
+        // 130 nested gzip codings are all decoded.
+        let j = br#"{"a":1}"#.to_vec();
+        let nested = (0..130).fold(j.clone(), |body, _| gz(&body));
+        let header = vec!["gzip"; 130].join(",");
+        assert_eq!(decode(&[header.as_str()], nested), j);
     }
 
     #[test]
