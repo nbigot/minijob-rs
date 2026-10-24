@@ -1,7 +1,7 @@
 //! Consul service registration (`web/webserver/webserver.go`, `hashicorp/consul/api`).
 //!
 //! The agent is configured like the Go client: `CONSUL_HTTP_ADDR` (default
-//! `127.0.0.1:8500`, may include the scheme), `CONSUL_HTTP_SSL`, `CONSUL_HTTP_SSL_VERIFY`,
+//! `localhost:8500`, may include the scheme), `CONSUL_HTTP_SSL`, `CONSUL_HTTP_SSL_VERIFY`,
 //! `CONSUL_CACERT`, `CONSUL_HTTP_TOKEN`, `CONSUL_HTTP_AUTH`. `consul.server.address/port` are
 //! the address and port of the registered service.
 
@@ -73,7 +73,8 @@ impl Consul {
         crate::tls::install_provider();
         let mut addr = env("CONSUL_HTTP_ADDR");
         if addr.is_empty() {
-            addr = "127.0.0.1:8500".into();
+            // consul/api v1.34: localhost, so an agent on ::1 is reached too
+            addr = "localhost:8500".into();
         }
         let ssl = matches!(
             env("CONSUL_HTTP_SSL").to_lowercase().as_str(),
@@ -236,7 +237,16 @@ mod tests {
         String,
         tokio::sync::mpsc::UnboundedReceiver<(String, String, String)>,
     ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        agent_on("127.0.0.1:0").await
+    }
+
+    async fn agent_on(
+        bind: &str,
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<(String, String, String)>,
+    ) {
+        let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -303,6 +313,31 @@ mod tests {
             "{line}"
         );
         assert_eq!(token, "secret");
+    }
+
+    /// The default agent is `localhost:8500`, as in consul/api v1.34: an agent listening only
+    /// on `::1` is reached.
+    #[tokio::test]
+    async fn localhost_reaches_an_ipv6_agent() {
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            return; // no IPv6 loopback
+        }
+        let (addr, mut rx) = agent_on("[::1]:0").await;
+        let port = addr.rsplit_once(':').unwrap().1.to_string();
+        let env = |name: &str| match name {
+            "CONSUL_HTTP_ADDR" => format!("localhost:{port}"),
+            _ => String::new(),
+        };
+        Consul::with_env(&ConsulConfig::default(), Logger::nop(), env)
+            .unwrap()
+            .register()
+            .await
+            .unwrap();
+        let (line, _, _) = rx.recv().await.unwrap();
+        assert!(
+            line.starts_with("PUT /v1/agent/service/register "),
+            "{line}"
+        );
     }
 
     /// The HTTP check is registered only with `healthCheck.enable`, with its `checkId` (Go
@@ -402,7 +437,7 @@ mod tests {
                     .unwrap_or_default()
             })
         };
-        assert_eq!(with(&[]).unwrap().base, "http://127.0.0.1:8500");
+        assert_eq!(with(&[]).unwrap().base, "http://localhost:8500");
         let c = with(&[
             ("CONSUL_HTTP_ADDR", "consul:8501"),
             ("CONSUL_HTTP_SSL", "TRUE"),
