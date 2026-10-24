@@ -181,6 +181,9 @@ these bugs too; where its behavior changed, this version follows it (see
 - A pull whose `topic` is not valid UTF-8 (`?topic=%ff`) is answered as usual, the topic
   being recorded with U+FFFD. In Go the Prometheus label panicked: v1.0.0 crashed at once,
   v1.1 answers `500` and crashes ten seconds later, when the job statistics are updated.
+- An empty pull on a new topic adds that topic to the metrics, as in Go, but the statistics
+  update doesn't allocate 160 KB per topic every ten seconds: 5,000 pulled topics hold about
+  90 MB (Go v1.1: 1.5 GB).
 - `/metrics` is always in the Prometheus text format (Go answered protobuf to a scraper that
   asks for it first), with `escaping=underscores` in its content type (Go repeated the
   `escaping` asked for). It is gzipped only when gzip has the highest weight in
