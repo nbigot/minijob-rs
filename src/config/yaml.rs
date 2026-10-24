@@ -1,20 +1,22 @@
 //! YAML decoding with the semantics of `gopkg.in/yaml.v3` decoding into Go structs.
 //!
-//! The document is parsed into a node tree (raw scalar text, style, tag and line kept), then
-//! decoded field by field with yaml.v3's rules:
+//! The document is parsed by libyaml (`libyaml-safer`), the parser yaml.v3 is a port of, with
+//! yaml.v3's changes (YAML 1.1 only, tabs after a comment, its look-ahead after the first
+//! document, its error messages), into a node tree (raw scalar text, style, tag and line
+//! kept), then decoded field by field with yaml.v3's rules:
 //!
 //! - plain scalars are resolved like yaml.v3 (`0x1F`, `0o17`, `017` octal, `1_000`, `.inf`,
-//!   `~`/`null`/empty = null); quoted scalars are strings;
+//!   `~`/`null`/empty = null); quoted scalars are strings; a tagged scalar must resolve to its
+//!   tag (`!!binary` is base64-decoded);
 //! - a string target accepts any scalar (raw text); bool targets also accept the YAML 1.1
-//!   words `y/yes/on/n/no/off`; floats with an integral range fit integer targets (truncated);
+//!   words `y/yes/on/n/no/off`; floats fit integer targets, converted as Go does;
 //! - `null` leaves scalars and structs unchanged and sets slices and maps to nil;
 //! - unknown keys are ignored, type errors are collected and reported together:
 //!   `yaml: unmarshal errors:\n  line N: cannot unmarshal !!str `abc` into int`;
 //! - anchors, aliases and merge keys (`<<`) are supported.
 
+use libyaml_safer::{ErrorKind, EventData, Mark, Parser, ScalarStyle, TokenData};
 use std::collections::HashMap;
-use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
-use yaml_rust2::scanner::{Marker, TScalarStyle};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
@@ -32,41 +34,38 @@ pub struct Node {
     pub line: usize,
 }
 
-fn short_tag(tag: &Tag) -> String {
-    if tag.handle == "!!" {
-        format!("!!{}", tag.suffix)
-    } else if let Some(rest) = tag.suffix.strip_prefix("tag:yaml.org,2002:") {
-        format!("!!{rest}")
-    } else {
-        format!("{}{}", tag.handle, tag.suffix)
+/// yaml.v3 `shortTag`, for the tag of a node: `!!str` for `tag:yaml.org,2002:str`; the
+/// non-specific `!` is no tag.
+fn short_tag(tag: Option<String>) -> Option<String> {
+    let tag = tag?;
+    if tag == "!" {
+        return None;
     }
+    Some(match tag.strip_prefix("tag:yaml.org,2002:") {
+        Some(rest) => format!("!!{rest}"),
+        None => tag,
+    })
 }
 
 enum Building {
-    Seq(Node, usize),
-    Map(Node, Option<Node>, usize),
+    Seq(Node, Option<String>),
+    Map(Node, Option<Node>, Option<String>),
 }
 
 #[derive(Default)]
 struct Builder {
     stack: Vec<Building>,
-    anchors: HashMap<usize, Node>,
+    anchors: HashMap<String, Node>,
     doc: Option<Node>,
-    docs_seen: usize,
-    error: Option<String>,
 }
 
 impl Builder {
-    fn push_value(&mut self, node: Node, anchor: usize) {
-        if anchor > 0 {
+    fn push_value(&mut self, node: Node, anchor: Option<String>) {
+        if let Some(anchor) = anchor {
             self.anchors.insert(anchor, node.clone());
         }
         match self.stack.last_mut() {
-            None => {
-                if self.docs_seen == 1 && self.doc.is_none() {
-                    self.doc = Some(node);
-                }
-            }
+            None => self.doc = Some(node),
             Some(Building::Seq(parent, _)) => {
                 if let Kind::Seq(items) = &mut parent.kind {
                     items.push(node);
@@ -84,66 +83,173 @@ impl Builder {
     }
 }
 
-impl MarkedEventReceiver for Builder {
-    fn on_event(&mut self, ev: Event, mark: Marker) {
-        let line = mark.line().max(1);
-        match ev {
-            Event::DocumentStart => self.docs_seen += 1,
-            Event::Scalar(value, style, anchor, tag) => {
-                let quoted = !matches!(style, TScalarStyle::Plain);
+/// A node at the start of an event (yaml.v3 `Node.Line`; a block scalar starts at its `|` or
+/// `>` indicator).
+fn line_of(mark: Mark) -> usize {
+    usize::try_from(mark.line).unwrap_or(usize::MAX - 1) + 1
+}
+
+/// A parse error as yaml.v3 words it (`parser.fail`): `yaml: line N: <problem>`, where N is
+/// the 0-based line of the context of the error, else of the problem, plus one for a scanner
+/// error, and the line is left out when it is 0.
+fn go_error(e: &libyaml_safer::Error) -> String {
+    let mut line = e.context_mark().map_or(0, |m| m.line);
+    if line == 0 {
+        line = e.problem_mark().map_or(0, |m| m.line);
+    }
+    if line != 0 && e.kind() == ErrorKind::Scanner {
+        line += 1;
+    }
+    let problem = match e.problem() {
+        "" => "unknown problem parsing YAML content",
+        p => p,
+    };
+    if line == 0 {
+        format!("yaml: {problem}")
+    } else {
+        format!("yaml: line {line}: {problem}")
+    }
+}
+
+/// Whether a line ends with a comment: `#` at its start or after a blank, outside quotes.
+fn has_comment(line: &str) -> bool {
+    let mut quote = None;
+    let mut prev = ' ';
+    for c in line.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == '#' && (prev == ' ' || prev == '\t') => return true,
+            None => {}
+        }
+        prev = c;
+    }
+    false
+}
+
+/// yaml.v3 reads the lines after a comment that are blank or comment-only as comments, tabs
+/// in their indentation included (`yaml_parser_scan_comments`), where libyaml refuses such a
+/// tab. These tabs become spaces; a tab elsewhere is left for libyaml to judge.
+fn tabs_after_comments(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\t') {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut after_comment = false;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_start_matches([' ', '\t']);
+        let blank_or_comment = content.trim_end().is_empty() || content.starts_with('#');
+        if after_comment && blank_or_comment {
+            let indent = line.len() - content.len();
+            out.push_str(&line[..indent].replace('\t', " "));
+            out.push_str(content);
+        } else {
+            out.push_str(line);
+            after_comment = has_comment(line);
+        }
+    }
+    out.into()
+}
+
+/// yaml.v3 scans tokens ahead of the end of the first document (its comment handling looks
+/// ahead), so a scanner error just after it is an error, as a `%YAML` line in the middle of
+/// the file followed by a key. The next document itself is not read.
+fn scan_ahead(text: &str, end: Mark) -> Result<(), String> {
+    const TOKENS_AHEAD: usize = 3;
+    let mut input = text.as_bytes();
+    let mut scanner = libyaml_safer::Scanner::new();
+    scanner.set_input_string(&mut input);
+    let mut ahead = 0;
+    for token in scanner {
+        match token {
+            // The closing tokens of the document are not counted.
+            Ok(t) if t.start_mark.index < end.index || t.data == TokenData::BlockEnd => {}
+            Ok(t) => {
+                ahead += 1;
+                if ahead == TOKENS_AHEAD || t.data == TokenData::StreamEnd {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Scanner => return Err(go_error(&e)),
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+/// Parses the first document with libyaml, as yaml.v3 does (`Decoder.Decode` reads one
+/// document). `Ok(None)` when the stream has no document (Go returns `EOF`).
+pub fn parse_first_document(text: &str) -> Result<Option<Node>, String> {
+    let text = tabs_after_comments(text);
+    let mut input = text.as_bytes();
+    let mut parser = Parser::new();
+    parser.set_input_string(&mut input);
+    let mut builder = Builder::default();
+    loop {
+        let event = parser.parse().map_err(|e| go_error(&e))?;
+        let line = line_of(event.start_mark);
+        match event.data {
+            EventData::StreamEnd => break,
+            EventData::DocumentEnd { .. } => {
+                scan_ahead(&text, event.end_mark)?;
+                break;
+            }
+            // yaml.v3 only knows YAML 1.1 (libyaml also accepts 1.2).
+            EventData::DocumentStart {
+                version_directive: Some(v),
+                ..
+            } if (v.major, v.minor) != (1, 1) => {
+                return Err(match event.start_mark.line {
+                    0 => "yaml: found incompatible YAML document".to_string(),
+                    l => format!("yaml: line {l}: found incompatible YAML document"),
+                });
+            }
+            EventData::Scalar {
+                anchor,
+                tag,
+                value,
+                style,
+                ..
+            } => {
+                let quoted = style != ScalarStyle::Plain;
                 let node = Node {
                     kind: Kind::Scalar { value, quoted },
-                    tag: tag.as_ref().map(short_tag),
+                    tag: short_tag(tag),
                     line,
                 };
-                self.push_value(node, anchor);
+                builder.push_value(node, anchor);
             }
-            Event::SequenceStart(anchor, tag) => self.stack.push(Building::Seq(
+            EventData::SequenceStart { anchor, tag, .. } => builder.stack.push(Building::Seq(
                 Node {
                     kind: Kind::Seq(Vec::new()),
-                    tag: tag.as_ref().map(short_tag),
+                    tag: short_tag(tag),
                     line,
                 },
                 anchor,
             )),
-            Event::MappingStart(anchor, tag) => self.stack.push(Building::Map(
+            EventData::MappingStart { anchor, tag, .. } => builder.stack.push(Building::Map(
                 Node {
                     kind: Kind::Map(Vec::new()),
-                    tag: tag.as_ref().map(short_tag),
+                    tag: short_tag(tag),
                     line,
                 },
                 None,
                 anchor,
             )),
-            Event::SequenceEnd | Event::MappingEnd => match self.stack.pop() {
+            EventData::SequenceEnd | EventData::MappingEnd => match builder.stack.pop() {
                 Some(Building::Seq(node, anchor)) | Some(Building::Map(node, _, anchor)) => {
-                    self.push_value(node, anchor)
+                    builder.push_value(node, anchor)
                 }
-                None => self.error = Some("unbalanced YAML events".into()),
+                None => return Err("yaml: unbalanced YAML events".into()),
             },
-            Event::Alias(id) => match self.anchors.get(&id).cloned() {
-                Some(mut node) => {
-                    node.line = line;
-                    self.push_value(node, 0);
-                }
-                None => self.error = Some(format!("yaml: line {line}: unknown anchor")),
+            // The node it names, with its own line (yaml.v3 decodes the anchored node).
+            EventData::Alias { anchor } => match builder.anchors.get(&anchor).cloned() {
+                Some(node) => builder.push_value(node, None),
+                None => return Err(format!("yaml: unknown anchor '{anchor}' referenced")),
             },
-            _ => {}
+            EventData::StreamStart { .. } | EventData::DocumentStart { .. } => {}
         }
-    }
-}
-
-/// Parses the first document. `Ok(None)` when the stream has no document (Go returns `EOF`).
-pub fn parse_first_document(text: &str) -> Result<Option<Node>, String> {
-    let mut builder = Builder::default();
-    let mut parser = Parser::new_from_str(text);
-    // yaml.v3 only reads the first document; later documents are not even parsed by
-    // Decoder.Decode, so stop at the first one.
-    parser
-        .load(&mut builder, false)
-        .map_err(|e| format!("yaml: {e}"))?;
-    if let Some(e) = builder.error {
-        return Err(e);
     }
     Ok(builder.doc)
 }
@@ -159,6 +265,11 @@ pub enum Resolved {
     Str(String),
     Timestamp(String),
     Merge,
+    /// A `!!binary` scalar, base64-decoded.
+    Binary(String),
+    /// A tagged scalar that does not resolve to its tag (yaml.v3 `failf`, a fatal error):
+    /// `cannot decode !!str `yes` as a !!bool`.
+    Fail(String),
 }
 
 impl Resolved {
@@ -168,10 +279,69 @@ impl Resolved {
             Resolved::Bool(_) => "!!bool",
             Resolved::Int(_) | Resolved::Uint(_) => "!!int",
             Resolved::Float(_) => "!!float",
-            Resolved::Str(_) => "!!str",
+            Resolved::Str(_) | Resolved::Fail(_) => "!!str",
             Resolved::Timestamp(_) => "!!timestamp",
             Resolved::Merge => "!!merge",
+            Resolved::Binary(_) => "!!binary",
         }
+    }
+}
+
+/// Go `base64.StdEncoding.DecodeString`: padded, line breaks ignored.
+fn go_base64(text: &str) -> Option<Vec<u8>> {
+    fn sextet(c: u8) -> Option<u32> {
+        Some(u32::from(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        }))
+    }
+    let bytes: Vec<u8> = text
+        .bytes()
+        .filter(|b| *b != b'\r' && *b != b'\n')
+        .collect();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let groups = bytes.len() / 4;
+    for (i, group) in bytes.chunks(4).enumerate() {
+        let pad = group.iter().rev().take_while(|&&b| b == b'=').count();
+        if pad > 2 || (pad > 0 && i + 1 != groups) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &b in &group[..4 - pad] {
+            n = (n << 6) | sextet(b)?;
+        }
+        n <<= 6 * pad as u32;
+        let decoded = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&decoded[..3 - pad]);
+    }
+    Some(out)
+}
+
+/// 2^63.
+const TWO_63: f64 = (1u64 << 63) as f64;
+
+/// Go's `int64(f)` on amd64: out of range and NaN give the minimum.
+fn go_f64_to_i64(f: f64) -> i64 {
+    if f.is_nan() || !(-TWO_63..TWO_63).contains(&f) {
+        i64::MIN
+    } else {
+        f as i64
+    }
+}
+
+/// Go's `uint64(f)` on amd64.
+fn go_f64_to_u64(f: f64) -> u64 {
+    if f < TWO_63 {
+        go_f64_to_i64(f) as u64
+    } else {
+        go_f64_to_i64(f - TWO_63) as u64 | (1 << 63)
     }
 }
 
@@ -401,24 +571,38 @@ pub fn resolve_node(node: &Node) -> (Resolved, String) {
     let Kind::Scalar { value, quoted } = &node.kind else {
         return (Resolved::Null, String::new());
     };
-    let resolved = match node.tag.as_deref() {
-        _ if *quoted => Resolved::Str(value.clone()),
-        Some("!!str") | Some("!!binary") => Resolved::Str(value.clone()),
-        Some("!!int") => match parse_go_int(&value.replace('_', "")) {
-            Some(r) => r,
-            None => Resolved::Str(value.clone()),
-        },
-        Some("!!float") => match value.parse::<f64>() {
-            Ok(f) => Resolved::Float(f),
-            Err(_) => resolve_plain(value),
-        },
-        _ => resolve_plain(value),
+    let tag = node.tag.as_deref();
+    // yaml.v3 `indicatedString`: `!!str`, or a quoted or block scalar without tag.
+    if tag == Some("!!str") || (tag.is_none() && *quoted) {
+        return (Resolved::Str(value.clone()), "!!str".into());
+    }
+    let Some(tag) = tag else {
+        let resolved = resolve_plain(value);
+        let tag = resolved.tag().to_string();
+        return (resolved, tag);
     };
-    let tag = node
-        .tag
-        .clone()
-        .unwrap_or_else(|| resolved.tag().to_string());
-    (resolved, tag)
+    let resolved = match tag {
+        "!!binary" => match go_base64(value) {
+            Some(bytes) => Resolved::Binary(String::from_utf8_lossy(&bytes).into_owned()),
+            None => Resolved::Fail("!!binary value contains invalid base64 data".into()),
+        },
+        // The value must resolve to its tag (an integer is also a float); timestamps are
+        // only tried for `!!timestamp`.
+        "!!bool" | "!!int" | "!!float" | "!!null" | "!!timestamp" => {
+            let resolved = match resolve_plain(value) {
+                Resolved::Timestamp(_) if tag != "!!timestamp" => Resolved::Str(value.clone()),
+                r => r,
+            };
+            match resolved {
+                Resolved::Int(i) if tag == "!!float" => Resolved::Float(i as f64),
+                r if r.tag() == tag => r,
+                r => Resolved::Fail(format!("cannot decode {} `{value}` as a {tag}", r.tag())),
+            }
+        }
+        // Other tags are not resolved (yaml.v3 `resolvableTag`).
+        _ => Resolved::Str(value.clone()),
+    };
+    (resolved, tag.to_string())
 }
 
 /// A Go `interface{}` decoded by yaml.v3, as zap receives it in `initialFields`.
@@ -501,12 +685,37 @@ impl Decoder {
         matches!(node.kind, Kind::Scalar { .. }) && resolve_node(node).0 == Resolved::Null
     }
 
-    /// Go `string`: any scalar, as written.
+    /// The resolved value of a scalar; a tagged scalar that does not resolve to its tag is a
+    /// fatal error (then `Null`: nothing is decoded).
+    fn resolve(&mut self, node: &Node) -> Resolved {
+        match resolve_node(node).0 {
+            Resolved::Fail(msg) => {
+                self.fail(format!("yaml: {msg}"));
+                Resolved::Null
+            }
+            r => r,
+        }
+    }
+
+    /// The text given to a Go `UnmarshalText`: the scalar as written (a `!!binary` one
+    /// decoded); `None` for null and for collections.
+    pub fn text(&mut self, node: &Node) -> Option<String> {
+        let Kind::Scalar { value, .. } = &node.kind else {
+            return None;
+        };
+        match self.resolve(node) {
+            Resolved::Null => None,
+            Resolved::Binary(b) => Some(b),
+            _ => Some(value.clone()),
+        }
+    }
+
+    /// Go `string`: any scalar, as written (a `!!binary` one decoded).
     pub fn string(&mut self, node: &Node, out: &mut String) {
         match &node.kind {
-            Kind::Scalar { value, .. } => {
-                if !Self::is_null(node) {
-                    out.clone_from(value);
+            Kind::Scalar { .. } => {
+                if let Some(text) = self.text(node) {
+                    *out = text;
                 }
             }
             _ => self.type_error(node, "string"),
@@ -518,10 +727,10 @@ impl Decoder {
         if !matches!(node.kind, Kind::Scalar { .. }) {
             return self.type_error(node, "bool");
         }
-        match resolve_node(node).0 {
+        match self.resolve(node) {
             Resolved::Null => {}
             Resolved::Bool(b) => *out = b,
-            Resolved::Str(s) => match s.as_str() {
+            Resolved::Str(s) | Resolved::Binary(s) => match s.as_str() {
                 "y" | "Y" | "yes" | "Yes" | "YES" | "on" | "On" | "ON" => *out = true,
                 "n" | "N" | "no" | "No" | "NO" | "off" | "Off" | "OFF" => *out = false,
                 _ => self.type_error(node, "bool"),
@@ -535,13 +744,12 @@ impl Decoder {
         if !matches!(node.kind, Kind::Scalar { .. }) {
             return self.type_error(node, go_type);
         }
-        let v = match resolve_node(node).0 {
+        // A float up to 2^63 is converted as Go converts it (`-.inf` gives the minimum).
+        let v = match self.resolve(node) {
             Resolved::Null => return,
             Resolved::Int(i) => Some(i),
             Resolved::Uint(u) => i64::try_from(u).ok(),
-            Resolved::Float(f) if f <= i64::MAX as f64 && f >= i64::MIN as f64 && !f.is_nan() => {
-                Some(f as i64)
-            }
+            Resolved::Float(f) if f <= i64::MAX as f64 => Some(go_f64_to_i64(f)),
             _ => None,
         };
         match v.and_then(|i| T::try_from(i).ok()) {
@@ -555,11 +763,12 @@ impl Decoder {
         if !matches!(node.kind, Kind::Scalar { .. }) {
             return self.type_error(node, go_type);
         }
-        let v = match resolve_node(node).0 {
+        // A float up to 2^64 is converted as Go converts it (`-1.0` wraps around).
+        let v = match self.resolve(node) {
             Resolved::Null => return,
             Resolved::Int(i) => u64::try_from(i).ok(),
             Resolved::Uint(u) => Some(u),
-            Resolved::Float(f) if f >= 0.0 && f <= u64::MAX as f64 => Some(f as u64),
+            Resolved::Float(f) if f <= u64::MAX as f64 => Some(go_f64_to_u64(f)),
             _ => None,
         };
         match v.and_then(|u| T::try_from(u).ok()) {
@@ -573,7 +782,7 @@ impl Decoder {
         if !matches!(node.kind, Kind::Scalar { .. }) {
             return self.type_error(node, "float64");
         }
-        match resolve_node(node).0 {
+        match self.resolve(node) {
             Resolved::Null => {}
             Resolved::Int(i) => *out = i as f64,
             Resolved::Uint(u) => *out = u as f64,
@@ -585,12 +794,15 @@ impl Decoder {
     /// Go `[]string`.
     pub fn string_list(&mut self, node: &Node, out: &mut Option<Vec<String>>) {
         match &node.kind {
+            // An item that does not decode (null, or a collection: a type error) is left
+            // out, as yaml.v3 does.
             Kind::Seq(items) => {
                 let mut list = Vec::with_capacity(items.len());
                 for item in items {
-                    let mut s = String::new();
-                    self.string(item, &mut s);
-                    list.push(s);
+                    match &item.kind {
+                        Kind::Scalar { .. } => list.extend(self.text(item)),
+                        _ => self.type_error(item, "string"),
+                    }
                 }
                 *out = Some(list);
             }
@@ -622,7 +834,7 @@ impl Decoder {
     /// Go `interface{}` value.
     pub fn any(&mut self, node: &Node) -> AnyValue {
         if let Kind::Scalar { .. } = &node.kind {
-            match resolve_node(node).0 {
+            match self.resolve(node) {
                 Resolved::Float(f) if !f.is_finite() => return AnyValue::Float(f),
                 Resolved::Timestamp(s) => {
                     if let Some(t) = parse_timestamp(&s) {
@@ -652,7 +864,7 @@ impl Decoder {
     fn json_value(&mut self, node: &Node) -> Result<serde_json::Value, f64> {
         use serde_json::Value;
         match &node.kind {
-            Kind::Scalar { .. } => Ok(match resolve_node(node).0 {
+            Kind::Scalar { .. } => Ok(match self.resolve(node) {
                 Resolved::Null | Resolved::Merge => Value::Null,
                 Resolved::Bool(b) => Value::Bool(b),
                 Resolved::Int(i) => Value::from(i),
@@ -662,7 +874,8 @@ impl Decoder {
                     Some(t) => crate::log::gotime::format(&t, crate::log::gotime::RFC3339_NANO),
                     None => s,
                 }),
-                Resolved::Str(s) => Value::String(s),
+                Resolved::Str(s) | Resolved::Binary(s) => Value::String(s),
+                Resolved::Fail(_) => Value::Null,
             }),
             Kind::Seq(items) => items.iter().map(|i| self.json_value(i)).collect(),
             Kind::Map(_) => {
@@ -845,7 +1058,8 @@ mod tests {
         dec.int(get(&n, "e"), &mut i, "int");
         let mut l = None;
         dec.string_list(get(&n, "g"), &mut l);
-        assert_eq!(l, Some(vec!["x".to_string(), String::new()]));
+        // A null item is left out (yaml.v3 does not set it).
+        assert_eq!(l, Some(vec!["x".to_string()]));
         let err = dec.finish().unwrap_err();
         assert_eq!(
             err,

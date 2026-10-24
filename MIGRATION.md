@@ -235,8 +235,7 @@ Redis:
 
 - Same zap configuration and JSON line layout. When `disableCaller: false`, the caller is a
   Rust source file and the function name is empty (an empty column with the console
-  encoding); with `disableStacktrace: false` the stack trace is the Rust one. YAML syntax
-  error messages differ.
+  encoding); with `disableStacktrace: false` the stack trace is the Rust one.
 - With the JSON encoding, a `callerKey` without `callerEncoder` and `disableCaller: false`
   crashed the Go server at its first log line (nil pointer); the port writes the short
   caller.
@@ -286,6 +285,10 @@ Redis:
   startup, as in Go v1.1. With Go v1.0.0 both were 0: a job pulled without visibility
   timeout was failed at the next check, and a pull with one was refused.
 
+- The configuration file is read as Go reads it: same accepted files, values and error
+  messages (it was checked on 15,000 altered copies of the templates). One message differs:
+  a line that starts with `:` (no key) gives `did not find expected key` (Go: `mapping values
+  are not allowed in this context`), on another line.
 - A negative `backend.inMemory.writeFrequency` is a configuration error (Go panicked).
 - CORS origins: entries of `allowOrigins` may have spaces after the commas, wildcard
   subdomains included (`"https://a.com, https://*.b.com"`); Go never matched the wildcard in

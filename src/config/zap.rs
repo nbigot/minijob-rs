@@ -1,6 +1,6 @@
 //! `zap.Config` as decoded from YAML by the Go server.
 
-use super::yaml::{Decoder, Kind, Node, Resolved, resolve_node};
+use super::yaml::{Decoder, Kind, Node};
 
 /// zap levels, in increasing order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -132,16 +132,10 @@ pub struct ZapConfig {
     pub initial_fields: Option<Vec<(String, super::yaml::AnyValue)>>,
 }
 
-/// Raw text of a scalar node for `UnmarshalText`; `None` for null or non-scalars.
+/// Text of a scalar node for `UnmarshalText`; `None` for null or non-scalars.
 fn text_of(dec: &mut Decoder, node: &Node, go_type: &str) -> Option<String> {
     match &node.kind {
-        Kind::Scalar { value, .. } => {
-            if resolve_node(node).0 == Resolved::Null {
-                None
-            } else {
-                Some(value.clone())
-            }
-        }
+        Kind::Scalar { .. } => dec.text(node),
         _ => {
             dec.type_error(node, go_type);
             None
@@ -197,6 +191,8 @@ fn decode_encoder(dec: &mut Decoder, node: &Node, out: &mut EncoderConfig) {
                     });
                     out.time_encoder = Some(TimeEncoder::Layout(layout));
                 }
+                // UnmarshalYAML tries a struct, then reports the error of a string.
+                Kind::Seq(_) => d.type_error(v, "string"),
                 _ => {
                     if let Some(t) = text_of(d, v, "zapcore.TimeEncoder") {
                         out.time_encoder = Some(time_encoder_from_text(&t));
@@ -236,6 +232,8 @@ fn decode_encoder(dec: &mut Decoder, node: &Node, out: &mut EncoderConfig) {
 pub fn decode(dec: &mut Decoder, node: &Node, out: &mut ZapConfig) {
     dec.mapping(node, "zap.Config", |d, k, v| {
         match k {
+            // A mapping is decoded into the struct, which has no exported field: ignored.
+            "level" if matches!(v.kind, Kind::Map(_)) => {}
             "level" => {
                 if let Some(t) = text_of(d, v, "zap.AtomicLevel") {
                     match Level::parse(&t) {
