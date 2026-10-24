@@ -166,4 +166,14 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(l).unwrap();
         }
     }
+
+    #[test]
+    fn topic_escaped_like_go() {
+        // escapeJSONString of Go v1.1.2
+        assert_eq!(escaped("plain é<&>"), "plain é<&>");
+        assert_eq!(
+            escaped("q\"b\\n\nr\rt\t\u{1}\u{1f}\u{7f}"),
+            "q\\\"b\\\\n\\nr\\rt\\t\\u0001\\u001f\u{7f}"
+        );
+    }
 }
