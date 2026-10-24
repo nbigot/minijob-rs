@@ -120,6 +120,10 @@ these bugs too; where its behavior changed, this version follows it (see
 - Duplicated names in `lockResources` are fine (Go left the job pending forever).
 - Pending jobs are queued as soon as their resources are free, instead of at the next
   one-second tick.
+- At startup, a resource claimed by two stored jobs (its lock was released through the admin
+  API and taken by another job) is held by the job created last; Go v1.0.0 picked one at
+  random. A job written twice in the jobs file is loaded once, from its last copy, as Go
+  does.
 
 ## JSON schema validation
 
