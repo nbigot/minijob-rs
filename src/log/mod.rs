@@ -732,6 +732,62 @@ mod tests {
         assert_eq!(json, "1792351239514.7505");
     }
 
+    /// Each time encoder for 2026-10-24T20:30:15.123456789+02:00: the JSON value and the
+    /// console column, as printed by zapcore's encoders.
+    #[test]
+    fn time_encoders_like_zap() {
+        let t = DateTime::parse_from_rfc3339("2026-10-24T20:30:15.123456789+02:00").unwrap();
+        let layout = TimeEncoder::Layout("15:04:05.000 Jan _2".into());
+        let cases = [
+            (
+                Some(TimeEncoder::Iso8601),
+                "\"2026-10-24T20:30:15.123+0200\"",
+                "2026-10-24T20:30:15.123+0200",
+            ),
+            (
+                Some(TimeEncoder::Rfc3339),
+                "\"2026-10-24T20:30:15+02:00\"",
+                "2026-10-24T20:30:15+02:00",
+            ),
+            (
+                Some(TimeEncoder::Rfc3339Nano),
+                "\"2026-10-24T20:30:15.123456789+02:00\"",
+                "2026-10-24T20:30:15.123456789+02:00",
+            ),
+            (
+                Some(layout),
+                "\"20:30:15.123 Oct 24\"",
+                "20:30:15.123 Oct 24",
+            ),
+            (
+                Some(TimeEncoder::Millis),
+                "1792866615123.4568",
+                "1.7928666151234568e+12",
+            ),
+            (
+                Some(TimeEncoder::Epoch),
+                "1792866615.1234567",
+                "1.7928666151234567e+09",
+            ),
+            (
+                Some(TimeEncoder::Nanos),
+                "1792866615123456789",
+                "1792866615123456789",
+            ),
+            (None, "1792866615123456789", "1792866615123456789"),
+        ];
+        for (encoder, json, console) in cases {
+            let e = encode_time(encoder.as_ref(), &t);
+            let mut out = String::new();
+            e.push_json(&mut out);
+            assert_eq!(
+                (out.as_str(), e.console().as_str()),
+                (json, console),
+                "{encoder:?}"
+            );
+        }
+    }
+
     fn sampler(initial: i64, thereafter: i64) -> Sampler {
         let c = cfg(&format!(
             "logger:\n  level: info\n  encoding: json\n  sampling: {{initial: {initial}, thereafter: {thereafter}}}\n"
