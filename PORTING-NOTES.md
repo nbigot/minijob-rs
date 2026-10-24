@@ -447,7 +447,7 @@ truncates floats into int fields.
 | `webserver.metrics.enable` | bool | false | `/metrics`, `/api/v1/metrics/*`; **false crashes the server (B02)** |
 | `webserver.swagger.enable` | bool | false | `/docs/*` |
 | `consul.enable` | bool | false | register service at start, deregister at stop |
-| `consul.server.address` / `.port` | string / int | | address/port **of the registered service** (the agent comes from `CONSUL_HTTP_ADDR`, default `127.0.0.1:8500`) |
+| `consul.server.address` / `.port` | string / int | | address/port **of the registered service** (the agent comes from `CONSUL_HTTP_ADDR`, default `localhost:8500`) |
 | `consul.server.token` | string | | ACL token |
 | `consul.server.replaceExistingChecks` | bool | false | |
 | `consul.service.id/name/tags/namespace/partition` | | | |
@@ -681,7 +681,7 @@ Fiber monitor page and Go pprof (no Rust equivalent producing Go profiles).
 | gofiber/fiber pprof | `/debug/pprof` | none (decision D5) |
 | gofiber/swagger, swaggo/swag, swaggo/files | swagger UI + doc | own handler, swagger-ui assets from `swaggo/files v2.0.2` embedded (feature `swagger-ui`) |
 | google/uuid | UUIDv7, parsing | `uuid` (v7, serde) + Go-compatible parser |
-| gopkg.in/yaml.v3 | config | `yaml-rust2` event parser + yaml.v3 resolution and error messages (`src/config/yaml.rs`) |
+| gopkg.in/yaml.v3 | config | `libyaml-safer` (libyaml, which yaml.v3 ports) + yaml.v3 resolution and error messages (`src/config/yaml.rs`) |
 | go.uber.org/zap | logs | own zap-compatible encoder (json/console) |
 | encoding/json | wire format | `serde`, `serde_json` + Go formatter (escaping, floats) + Go-compatible decoder |
 | qri-io/jsonschema | validation | own module porting qri-io semantics; `regex` (RE2 syntax like Go) |
@@ -792,7 +792,7 @@ Versions: latest releases at the start of phase 2, locked in `Cargo.lock`.
 | `tokio` (rt-multi-thread, net, time, sync, signal, fs, macros) | runtime | core |
 | `hyper` 1, `hyper-util`, `http`, `http-body-util`, `bytes`, `futures-util` | HTTP server; own router (see below) | core |
 | `serde`, `serde_json` | JSON (+ own Go formatter/decoder) | core |
-| `yaml-rust2` | YAML events (raw scalars, styles, lines) | core |
+| `libyaml-safer` | YAML events (raw scalars, styles, lines), libyaml's parser and messages | core |
 | `uuid` (v7, serde) | ids | core |
 | `chrono` | local time in logs and the event file | core |
 | `parking_lot` | locks | core |
@@ -821,7 +821,9 @@ Changed during phase 2:
   Fiber exactly; hyper serves it directly.
 - **`yaml-rust2` instead of a serde YAML crate**, to keep the raw text, style and line of each
   scalar: yaml.v3 resolves `017` as octal, accepts `yes`/`on` for bools, and its error
-  messages quote the raw value and line.
+  messages quote the raw value and line. Replaced by **`libyaml-safer`** for Go v1.1.2: a
+  Rust port of libyaml, the parser yaml.v3 itself ports, so the same files are accepted and
+  syntax errors are found at the same place.
 - **rustls with the `ring` provider** (reqwest `rustls-no-provider`): the default `aws-lc-rs`
   needs cmake and a C toolchain, which complicates the musl and armv7 cross builds.
 - `serde_json` with `raw_value`, to quote `enum` values exactly as written in the schema.
