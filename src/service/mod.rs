@@ -1007,11 +1007,7 @@ impl Service {
                     Arc::make_mut(entry).visibility_timeout = vt;
                     let job = entry.clone();
                     st.generation += 1;
-                    // Go does not persist the change in Redis; the port does, except for
-                    // completed jobs (a SET would clear their TTL).
-                    if !job.is_completed()
-                        && let Some(t) = self.backend.on_job(&job, ServiceEvent::JobTimeout)
-                    {
+                    if let Some(t) = self.backend.on_job_updated(&job) {
                         fx.tickets.push(t);
                     }
                     Ok(())

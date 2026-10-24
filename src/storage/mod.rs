@@ -46,6 +46,8 @@ fn go_event_type(ev: ServiceEvent) -> Option<i64> {
 const EVENT_ALL_JOBS_DELETED: i64 = 12;
 const EVENT_ALL_RESOURCES_UNLOCKED: i64 = 13;
 const EVENT_RESOURCE_UNLOCKED: i64 = 14;
+/// `EventJobUpdated` (Go v1.1.2).
+const EVENT_JOB_UPDATED: i64 = 16;
 
 /// `inMemory` backend: nothing to do per event; the service saves snapshots periodically.
 pub struct InMemory {
@@ -255,6 +257,19 @@ impl Backend {
         match &self.provider {
             #[cfg(feature = "redis")]
             Provider::Redis(r) => r.on_job(job, ev),
+            _ => None,
+        }
+    }
+
+    /// A change without an event of its own, the visibility timeout (Go v1.1.2
+    /// `OnJobUpdated`, called under the service lock): the inMemory and mock providers notify
+    /// it; Redis saves the job, except a completed one (a SET would clear its TTL).
+    pub fn on_job_updated(&self, job: &Arc<Job>) -> Option<Ticket> {
+        self.notify_job(EVENT_JOB_UPDATED, job.id);
+        match &self.provider {
+            // Saved without TTL, as for the events other than JobSucceeded.
+            #[cfg(feature = "redis")]
+            Provider::Redis(r) if !job.is_completed() => r.on_job(job, ServiceEvent::JobTimeout),
             _ => None,
         }
     }
