@@ -202,6 +202,10 @@ Redis:
   retry: 18 s with the template URL instead of 6 s). In Go a failed write was only logged:
   the job reached Redis only if a later change to the same job was saved.
 - All go-redis URL options are accepted; `client_name` is set on the first connection.
+- An error returned by Redis is logged as go-redis words it (`NOPERM User ...`,
+  `OOM command not allowed ...`, for a pipeline the error of its first failed command); a
+  network error gives its cause in other words (Go: `dial tcp 127.0.0.1:6379: connect:
+  connection refused`).
 - No `Error closing Redis client` line at shutdown (Go stopped the provider twice and logged
   `redis: client is closed`).
 
