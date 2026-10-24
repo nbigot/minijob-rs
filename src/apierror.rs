@@ -150,4 +150,25 @@ mod tests {
             r#"{"error":"invalid job uuid","code":1000,"jobUUID":"00000000-0000-0000-0000-000000000000","validationErrors":[{"failedField":"jobuuid","tag":"parameter","value":"pull"}]}"#
         );
     }
+
+    #[test]
+    fn empty_fields_are_omitted_like_go() {
+        // omitempty on error, details, failedField, tag and value
+        let id = Uuid::parse_str("01a16efe-bf98-7ac6-a375-a8352a9e16e5").unwrap();
+        let mut e = ApiError::new(500, 7, "").job(id).validation(vec![
+            ValidationError::default(),
+            ValidationError {
+                tag: "required".into(),
+                ..Default::default()
+            },
+        ]);
+        e.details = "more".into();
+        assert_eq!(
+            String::from_utf8(e.body()).unwrap(),
+            r#"{"details":"more","code":7,"jobUUID":"01a16efe-bf98-7ac6-a375-a8352a9e16e5","validationErrors":[{},{"tag":"required"}]}"#
+        );
+        let e = ApiError::new(404, 1001, "job not found").cause("io");
+        assert_eq!(e.to_string(), "job not found");
+        assert_eq!(e.cause.as_deref(), Some("io"));
+    }
 }

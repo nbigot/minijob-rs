@@ -324,4 +324,166 @@ mod tests {
         let e = crate::config::parse("logger:\n  level: verbose\n").unwrap_err();
         assert_eq!(e, "unrecognized level: \"verbose\"");
     }
+
+    #[test]
+    fn level_names() {
+        let all = [
+            Level::Debug,
+            Level::Info,
+            Level::Warn,
+            Level::Error,
+            Level::DPanic,
+            Level::Panic,
+            Level::Fatal,
+        ];
+        for l in all {
+            assert_eq!(Level::parse(l.lower()), Ok(l));
+            assert_eq!(Level::parse(l.capital()), Ok(l));
+            assert_eq!(l.capital(), l.lower().to_uppercase());
+        }
+    }
+
+    /// The encoders and sampling chosen, as a Go program printed them for v1.1.2
+    /// (encoder functions compared with zapcore's; "other" is a time layout).
+    fn chosen(c: &ZapConfig) -> String {
+        let e = &c.encoder;
+        let level = e.level_encoder.map(|l| match l {
+            LevelEncoder::Lowercase => "lower",
+            LevelEncoder::LowercaseColor => "lowerColor",
+            LevelEncoder::Capital => "capital",
+            LevelEncoder::CapitalColor => "capitalColor",
+        });
+        let time = e.time_encoder.as_ref().map(|t| match t {
+            TimeEncoder::Rfc3339Nano => "rfc3339nano",
+            TimeEncoder::Rfc3339 => "rfc3339",
+            TimeEncoder::Iso8601 => "iso8601",
+            TimeEncoder::Millis => "millis",
+            TimeEncoder::Nanos => "nanos",
+            TimeEncoder::Epoch => "epoch",
+            TimeEncoder::Layout(_) => "other",
+        });
+        let duration = e.duration_encoder.map(|d| match d {
+            DurationEncoder::Seconds => "seconds",
+            DurationEncoder::Nanos => "nanos",
+            DurationEncoder::Millis => "ms",
+            DurationEncoder::String => "string",
+        });
+        let caller = e.caller_encoder.map(|c| match c {
+            CallerEncoder::Short => "short",
+            CallerEncoder::Full => "full",
+        });
+        format!(
+            "level={level:?} time={time:?} duration={duration:?} caller={caller:?} sampling={:?}",
+            c.sampling.as_ref().map(|s| (s.initial, s.thereafter))
+        )
+    }
+
+    #[test]
+    fn encoders_like_go() {
+        let cases = [
+            (
+                "logger:\n  encoderConfig:\n    levelEncoder: color\n    timeEncoder: {layout: '15:04', other: 1}\n    durationEncoder: ms\n    callerEncoder: short\n    nameEncoder: full\n",
+                Ok(
+                    "level=Some(\"lowerColor\") time=Some(\"other\") duration=Some(\"ms\") caller=Some(\"short\") sampling=None",
+                ),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    levelEncoder: capitalColor\n    timeEncoder: millis\n    durationEncoder: nanos\n    callerEncoder: full\n    nameEncoder: x\n",
+                Ok(
+                    "level=Some(\"capitalColor\") time=Some(\"millis\") duration=Some(\"nanos\") caller=Some(\"full\") sampling=None",
+                ),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    levelEncoder: [a]\n",
+                Err(
+                    "yaml: unmarshal errors:\n  line 3: cannot unmarshal !!seq into zapcore.LevelEncoder",
+                ),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    nameEncoder: {a: 1}\n",
+                Err(
+                    "yaml: unmarshal errors:\n  line 3: cannot unmarshal !!map into zapcore.NameEncoder",
+                ),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    durationEncoder: [1]\n    callerEncoder: {a: b}\n",
+                Err(
+                    "yaml: unmarshal errors:\n  line 3: cannot unmarshal !!seq into zapcore.DurationEncoder\n  line 4: cannot unmarshal !!map into zapcore.CallerEncoder",
+                ),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    timeEncoder: [x]\n",
+                Err("yaml: unmarshal errors:\n  line 3: cannot unmarshal !!seq into string"),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    timeEncoder: nanos\n    durationEncoder: string\n    levelEncoder: capital\n",
+                Ok(
+                    "level=Some(\"capital\") time=Some(\"nanos\") duration=Some(\"string\") caller=None sampling=None",
+                ),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    timeEncoder: RFC3339\n    durationEncoder: other\n",
+                Ok(
+                    "level=None time=Some(\"rfc3339\") duration=Some(\"seconds\") caller=None sampling=None",
+                ),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    timeEncoder: rfc3339nano\n",
+                Ok("level=None time=Some(\"rfc3339nano\") duration=None caller=None sampling=None"),
+            ),
+            (
+                "logger:\n  encoderConfig:\n    levelEncoder: ~\n    timeEncoder: ~\n    durationEncoder: ~\n    callerEncoder: ~\n    nameEncoder: ~\n",
+                Ok("level=None time=None duration=None caller=None sampling=None"),
+            ),
+            (
+                "logger:\n  sampling: {initial: 1, thereafter: 2, other: 3}\n",
+                Ok("level=None time=None duration=None caller=None sampling=Some((1, 2))"),
+            ),
+            (
+                "logger:\n  sampling: 5\n",
+                Err(
+                    "yaml: unmarshal errors:\n  line 2: cannot unmarshal !!int `5` into zap.SamplingConfig",
+                ),
+            ),
+            (
+                "logger:\n  sampling: ~\n",
+                Ok("level=None time=None duration=None caller=None sampling=None"),
+            ),
+            (
+                "logger:\n  sampling: {initial: 1}\n  level: [info]\n",
+                Err(
+                    "yaml: unmarshal errors:\n  line 3: cannot unmarshal !!seq into zap.AtomicLevel",
+                ),
+            ),
+            (
+                "logger:\n  level: {a: 1}\n  sampling: [1]\n",
+                Err(
+                    "yaml: unmarshal errors:\n  line 3: cannot unmarshal !!seq into zap.SamplingConfig",
+                ),
+            ),
+            (
+                "logger:\n  level: ~\n",
+                Ok("level=None time=None duration=None caller=None sampling=None"),
+            ),
+            (
+                "logger:\n  level: DPANIC\n  encoderConfig: [1]\n",
+                Err(
+                    "yaml: unmarshal errors:\n  line 3: cannot unmarshal !!seq into zapcore.EncoderConfig",
+                ),
+            ),
+            (
+                "logger: [1]\n",
+                Err("yaml: unmarshal errors:\n  line 1: cannot unmarshal !!seq into zap.Config"),
+            ),
+        ];
+        for (yaml, want) in cases {
+            let got = crate::config::parse(yaml).map(|c| chosen(&c.logger));
+            let want = want.map(String::from).map_err(String::from);
+            assert_eq!(got, want, "{yaml}");
+        }
+        let c = crate::config::parse("logger:\n  level: DPANIC\n").unwrap();
+        assert_eq!(c.logger.level, Some(Level::DPanic));
+        let c = crate::config::parse("logger:\n  level: ~\n").unwrap();
+        assert_eq!(c.logger.level, None);
+    }
 }
