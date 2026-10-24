@@ -427,8 +427,8 @@ truncates floats into int fields.
 | `jobs.maxAllowedJobs` | uint | 0 = unlimited | create → 503 when `count ≥ max` |
 | `jobs.jsonSchema.enable` | bool | false | |
 | `jobs.jsonSchema.path` | string | | relative to the **working directory** |
-| `jobs.defaultVisibilityTimeout` | uint | **0** | seconds; 0 → a pulled job times out ≈1 s later |
-| `jobs.maxVisibilityTimeout` | uint | **0** | seconds; 0 → any explicit `visibilitytimeout` rejected |
+| `jobs.defaultVisibilityTimeout` | uint | **0** | seconds; 0 → a pulled job times out ≈1 s later (v1.1.2: 60, at most the maximum) |
+| `jobs.maxVisibilityTimeout` | uint | **0** | seconds; 0 → any explicit `visibilitytimeout` rejected (v1.1.2: 86400; default > max refused) |
 | `jobs.retentionPolicy.enable` | bool | false | |
 | `jobs.retentionPolicy.interval` | int | 0 → 60 | seconds, minimum 60 |
 | `jobs.retentionPolicy.maxJobAge` | int | 0 | seconds after the last event; < 0 = no age limit; 0 = delete at once |
@@ -452,7 +452,7 @@ truncates floats into int fields.
 | `consul.server.replaceExistingChecks` | bool | false | |
 | `consul.service.id/name/tags/namespace/partition` | | | |
 | `consul.healthCheck.interval/timeout/url` | string | | Go duration strings passed to Consul as-is |
-| `consul.healthCheck.enable/checkId` | | | **ignored** (the HTTP check is always registered) |
+| `consul.healthCheck.enable/checkId` | | | **ignored** (the HTTP check is always registered; v1.1.2: registered only when enabled, with its id) |
 
 Commented keys in the templates (`bulkFlushFrequency`, `bulkMaxSize`, …) are not read.
 
@@ -466,7 +466,7 @@ Templates (all must work unchanged):
 | `docker/config/config.yaml` | inMemory | `/app/data/jobs.json` every 30 s | on (`./config/schema.json`) | 0.0.0.0:8080 | retention maxJobs 10000 |
 
 All templates: metrics on, monitor on, swagger on, Consul off, `retryPolicy` = `maxRetry: 3,
-base: 2, factor: 2, maxDuration: 60` with no `type` (→ constant **2 ms**; see B18a).
+base: 2, factor: 2, maxDuration: 60` with no `type` (→ constant **2 ms**; see B18a). Go v1.1.2: `type: 2, base: 1000, maxDuration: 60000`.
 `redis.url` example: `redis://localhost:6379/3?dial_timeout=3&db=1&read_timeout=6s&max_retries=2&client_name=minijob`
 (→ DB 1: the `db` query parameter overrides the path).
 

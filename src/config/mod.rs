@@ -425,7 +425,33 @@ pub fn load(path: &str) -> Result<Config, String> {
     let parse_err = |e: String| format!("error while parsing configuration file {path} : {e}");
     let text = String::from_utf8(bytes)
         .map_err(|_| parse_err("yaml: invalid leading UTF-8 octet".to_string()))?;
-    parse(&text).map_err(parse_err)
+    let mut cfg = parse(&text).map_err(parse_err)?;
+    cfg.jobs
+        .set_visibility_timeouts()
+        .map_err(|e| format!("invalid configuration file {path} : {e}"))?;
+    Ok(cfg)
+}
+
+impl JobsConfig {
+    /// Gives the template values to the visibility timeouts missing from the configuration
+    /// (Go `setVisibilityTimeouts`): when they were 0, a job pulled without visibility timeout
+    /// was failed at the next check, and a pull with one was refused. The default is at most
+    /// the maximum.
+    fn set_visibility_timeouts(&mut self) -> Result<(), String> {
+        if self.max_visibility_timeout == 0 {
+            self.max_visibility_timeout = 86400;
+        }
+        if self.default_visibility_timeout == 0 {
+            self.default_visibility_timeout = self.max_visibility_timeout.min(60);
+        }
+        if self.default_visibility_timeout > self.max_visibility_timeout {
+            return Err(format!(
+                "jobs.defaultVisibilityTimeout ({}) is greater than jobs.maxVisibilityTimeout ({})",
+                self.default_visibility_timeout, self.max_visibility_timeout
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -454,8 +480,12 @@ mod tests {
         );
         assert_eq!(c.jobs.retention_policy.max_jobs, 1000);
         assert_eq!(c.jobs.retry_policy.max_retry, 3);
-        assert_eq!(c.jobs.retry_policy.backoff_strategy.base, 2);
-        assert_eq!(c.jobs.retry_policy.backoff_strategy.kind, 0);
+        assert_eq!(c.jobs.retry_policy.backoff_strategy.kind, 2);
+        assert_eq!(c.jobs.retry_policy.backoff_strategy.base, 1000);
+        assert_eq!(c.jobs.retry_policy.backoff_strategy.max_duration, 60000);
+        assert_eq!(c.jobs.retry_policy.backoff_strategy.delay_ms(1), 2000);
+        assert!(c.consul.health_check.enable);
+        assert_eq!(c.consul.health_check.check_id, "alive");
         assert_eq!(c.jobs.default_visibility_timeout, 60);
         assert_eq!(c.jobs.max_visibility_timeout, 86400);
         assert_eq!(c.webserver.http.address, "127.0.0.1:8080");
@@ -498,6 +528,43 @@ mod tests {
         assert!(load("does-not-exist.yaml")
             .unwrap_err()
             .starts_with("error while opening configuration file does-not-exist.yaml : open does-not-exist.yaml: "));
+    }
+
+    /// Missing visibility timeouts get the template values (Go v1.1.2); a default greater than
+    /// the maximum is refused.
+    #[test]
+    fn visibility_timeout_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let load_yaml = |name: &str, yaml: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, yaml).unwrap();
+            load(path.to_str().unwrap()).map(|c| {
+                (
+                    c.jobs.default_visibility_timeout,
+                    c.jobs.max_visibility_timeout,
+                )
+            })
+        };
+        assert_eq!(load_yaml("a.yaml", "jobs: {}\n"), Ok((60, 86400)));
+        assert_eq!(
+            load_yaml("b.yaml", "jobs:\n  maxVisibilityTimeout: 30\n"),
+            Ok((30, 30))
+        );
+        assert_eq!(
+            load_yaml("c.yaml", "jobs:\n  defaultVisibilityTimeout: 120\n"),
+            Ok((120, 86400))
+        );
+        let path = dir.path().join("d.yaml");
+        assert_eq!(
+            load_yaml(
+                "d.yaml",
+                "jobs:\n  defaultVisibilityTimeout: 120\n  maxVisibilityTimeout: 60\n"
+            ),
+            Err(format!(
+                "invalid configuration file {} : jobs.defaultVisibilityTimeout (120) is greater than jobs.maxVisibilityTimeout (60)",
+                path.display()
+            ))
+        );
     }
 
     // Port of retrypolicy/backoff_test.go (delays in milliseconds).

@@ -6,7 +6,9 @@ layout. You can stop the Go server and start this one on the same configuration 
 
 This page lists what you can still notice, grouped by topic. Most items are bugs of the Go
 version that are fixed here; the few deliberate behavior changes are marked **(change)**.
-"Go" means Go minijob v1.0.0, the version this one was ported from.
+"Go" means Go minijob v1.0.0, the version this one was ported from. Go v1.1 fixed many of
+these bugs too; where its behavior changed, this version follows it (see
+[Go v1.1](#go-v11)).
 
 ## Data compatibility
 
@@ -238,19 +240,24 @@ Redis:
 ## Configuration notes
 
 - Retry delays (`jobs.retryPolicy.backoffStrategy.base` and `maxDuration`) are milliseconds,
-  as in the Go code. The shipped templates set `base: 2` and `maxDuration: 60` without `type`
-  (constant), so the delay between retries is 2 ms. For 2 s, then 4 s, 8 s... up to one
-  minute, use:
+  as in the Go code. The templates of Go v1.0.0 set `base: 2` and `maxDuration: 60` without
+  `type` (constant), so the delay between retries was 2 ms. The templates now retry after
+  2 s, then 4 s... up to one minute, as in Go v1.1:
 
   ```yaml
   retryPolicy:
       maxRetry: 3
       backoffStrategy:
           type: 2          # 0 constant, 1 linear, 2 exponential
-          base: 2000       # milliseconds
+          base: 1000       # milliseconds
           factor: 2
           maxDuration: 60000
   ```
+
+- Without `jobs.maxVisibilityTimeout` and `jobs.defaultVisibilityTimeout`, they are 86400 s
+  and 60 s (at most the maximum), and a default greater than the maximum is refused at
+  startup, as in Go v1.1. With Go v1.0.0 both were 0: a job pulled without visibility
+  timeout was failed at the next check, and a pull with one was refused.
 
 - A negative `backend.inMemory.writeFrequency` is a configuration error (Go panicked).
 - CORS origins: entries of `allowOrigins` may have spaces after the commas, wildcard
@@ -259,7 +266,24 @@ Redis:
 - Consul: same registration, agent configured by the `CONSUL_HTTP_*` environment variables;
   `unix://` agent addresses are not supported. The service is deregistered with
   `consul.server.token`, like the registration (Go used only `CONSUL_HTTP_TOKEN`, so with
-  ACLs and the token in the configuration the stopped service stayed registered).
+  ACLs and the token in the configuration the stopped service stayed registered). The HTTP
+  health check is registered only with `consul.healthCheck.enable: true`, with its
+  `checkId`, as in Go v1.1 (Go v1.0.0 always registered it, without its id). The templates
+  have `enable: true`; a configuration copied from the old templates has `enable: false` and
+  registers no check.
+
+## Go v1.1
+
+Go v1.1.2 fixes many of the bugs listed above; this version follows its fixes (templates,
+Consul health check, default visibility timeouts, clone limit, lock owner at startup, JSON
+schema `definitions` and `$ref` loops, 500 on a panic, decoded body limit, `Vary` headers of
+`/metrics`). Remaining differences with Go v1.1.2, besides those described above:
+
+- Go v1.1 is built with Go 1.27, whose `encoding/json` words its decoding errors
+  differently (`cannot unmarshal number into Go struct field _dependentRequired.a of type
+  []string`, `into Required.0 of type string`). They only show in the messages of a schema
+  file or a jobs file refused at startup; this version keeps the wording of Go 1.25 (Go
+  v1.0.0). API answers are not affected.
 
 ## How compatibility was checked
 
