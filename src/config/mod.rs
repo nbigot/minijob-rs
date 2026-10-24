@@ -567,6 +567,101 @@ mod tests {
         );
     }
 
+    /// Decoding as Go v1.1.2 decodes these files (yaml.v3 on libyaml): tags, `!!binary`,
+    /// Go's float conversions, tabs, directives, null items, zap's levels and encoders. The
+    /// expected values and messages are Go's.
+    #[test]
+    fn yaml_like_yaml_v3() {
+        let err = |yaml: &str| parse(yaml).unwrap_err();
+        let unmarshal = |line: u32, what: &str| {
+            format!("yaml: unmarshal errors:\n  line {line}: cannot unmarshal {what}")
+        };
+        // Tags: !!str is a string; a value must resolve to its tag; other tags are kept.
+        assert_eq!(
+            err("jobs:\n    logVerbosity: !!str 5\n"),
+            unmarshal(2, "!!str `5` into int")
+        );
+        assert_eq!(
+            err("webserver:\n    cors:\n        enable: !!bool yes\n"),
+            "yaml: cannot decode !!str `yes` as a !!bool"
+        );
+        assert_eq!(
+            err("environment: !foo bar\njobs:\n    logVerbosity: !foo 3\n"),
+            unmarshal(3, "!foo `3` into int")
+        );
+        let c =
+            parse("environment: !!binary aGk=\njobs:\n    logVerbosity: !!int \"7\"\n").unwrap();
+        assert_eq!((c.environment.as_str(), c.jobs.log_verbosity), ("hi", 7));
+        assert_eq!(
+            err("environment: !!binary aGk\n"),
+            "yaml: !!binary value contains invalid base64 data"
+        );
+        assert_eq!(
+            parse("jobs:\n    logVerbosity: !!float 5\n")
+                .unwrap()
+                .jobs
+                .log_verbosity,
+            5
+        );
+        // Floats into integers, converted like Go on amd64.
+        let c = parse("jobs:\n    logVerbosity: -.Inf\n    maxAllowedJobs: -1.0\n").unwrap();
+        assert_eq!(
+            (c.jobs.log_verbosity, c.jobs.max_allowed_jobs),
+            (i64::MIN, u64::MAX)
+        );
+        assert_eq!(
+            err("jobs:\n    maxAllowedJobs: .nan\n"),
+            unmarshal(2, "!!float `.nan` into uint")
+        );
+        // Tabs: allowed after a comment, after a colon and in quoted strings.
+        let c = parse("jobs:\n    # a comment\n\t# commented out\n    logVerbosity: 2\n").unwrap();
+        assert_eq!(c.jobs.log_verbosity, 2);
+        assert_eq!(
+            err("jobs:\n    logVerbosity: 2\n\t# commented out\n"),
+            "yaml: line 2: found a tab character that violates indentation"
+        );
+        assert_eq!(
+            err("\tenvironment: x\n"),
+            "yaml: found character that cannot start any token"
+        );
+        assert_eq!(parse("environment:\tx\n").unwrap().environment, "x");
+        assert_eq!(parse("environment: \"a\nb\"\n").unwrap().environment, "a b");
+        assert_eq!(parse("environment: 'x\n\ty'\n").unwrap().environment, "x y");
+        // Directives: YAML 1.1 only; one in the middle of the file is not an end.
+        assert_eq!(
+            err("%YAML 1.2\n---\nenvironment: x\n"),
+            "yaml: found incompatible YAML document"
+        );
+        assert_eq!(
+            err("environment: x\n%YAML 1.2\njobs:\n    logVerbosity: 1\n"),
+            "yaml: line 3: mapping values are not allowed in this context"
+        );
+        assert_eq!(
+            err("environment: x\n: 1\n"),
+            "yaml: line 1: did not find expected key"
+        );
+        // Null items of a list are left out; a mapping for the level is ignored.
+        let c = parse("logger:\n    level: {a: 1}\n    outputPaths: [~, stdout, \"\"]\n").unwrap();
+        assert_eq!(c.logger.level, None);
+        assert_eq!(
+            c.logger.output_paths,
+            Some(vec!["stdout".into(), String::new()])
+        );
+        assert_eq!(
+            err("logger:\n    encoderConfig:\n        timeEncoder: [1]\n"),
+            unmarshal(3, "!!seq into string")
+        );
+        // Lines: a block scalar is at its indicator, an alias at its anchored node.
+        assert_eq!(
+            err("jobs:\n    logVerbosity: |\n\nenvironment: x\n"),
+            unmarshal(2, "!!str `` into int")
+        );
+        assert_eq!(
+            err("x: &a abc\njobs:\n    logVerbosity: *a\n"),
+            unmarshal(1, "!!str `abc` into int")
+        );
+    }
+
     // Port of retrypolicy/backoff_test.go (delays in milliseconds).
     #[test]
     fn compute_delay() {
