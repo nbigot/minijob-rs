@@ -150,25 +150,96 @@ pub async fn metrics(app: Arc<App>, req: Req) -> Resp {
     };
     let (body, _) = p.encode();
     let ctype = "text/plain; version=0.0.4; charset=utf-8; escaping=underscores";
-    let gzip = req
-        .header("accept-encoding")
-        .split(',')
-        .any(|e| e.trim().split(';').next() == Some("gzip"));
-    if gzip {
+    let mut r = None;
+    if metrics_gzip(&req) {
         use std::io::Write;
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         if enc.write_all(&body).is_ok()
             && let Ok(compressed) = enc.finish()
         {
-            let mut r = super::http::response(200, ctype, compressed);
-            r.headers_mut().insert(
+            let mut gz = super::http::response(200, ctype, compressed);
+            gz.headers_mut().insert(
                 http::header::CONTENT_ENCODING,
                 http::HeaderValue::from_static("gzip"),
             );
-            return r;
+            r = Some(gz);
         }
     }
-    super::http::response(200, ctype, body)
+    let mut r = r.unwrap_or_else(|| super::http::response(200, ctype, body));
+    // promhttp (client_golang v1.25, Go v1.1.2).
+    for vary in ["Accept", "Accept-Encoding"] {
+        r.headers_mut()
+            .append(http::header::VARY, http::HeaderValue::from_static(vary));
+    }
+    r
+}
+
+/// promhttp's choice of compression (gddo `NegotiateContentEncoding` over identity then
+/// gzip): the offer with the highest `Accept-Encoding` weight, identity on a tie, none
+/// (identity) when that weight is 0. The values are parsed like gddo's `ParseAccept`: a
+/// value stops at the first element it cannot read.
+fn metrics_gzip(req: &Req) -> bool {
+    fn is_token(b: u8) -> bool {
+        b > 31 && b < 127 && !b" \t\"(),/:;<=>?@[]\\{}".contains(&b)
+    }
+    fn skip_space(s: &[u8]) -> &[u8] {
+        let n = s.iter().take_while(|b| b" \t\r\n".contains(b)).count();
+        &s[n..]
+    }
+    /// `expectQuality` (with Go's wrapping `int` arithmetic).
+    fn quality(s: &[u8]) -> (f64, &[u8]) {
+        let q = match s.first() {
+            Some(b'0') => 0.0,
+            Some(b'1') => 1.0,
+            _ => return (-1.0, b""),
+        };
+        let Some(s) = s[1..].strip_prefix(b".") else {
+            return (q, &s[1..]);
+        };
+        let digits = s.iter().take_while(|b| b.is_ascii_digit()).count();
+        let (mut n, mut d) = (0i64, 1i64);
+        for b in &s[..digits] {
+            n = n.wrapping_mul(10).wrapping_add(i64::from(b - b'0'));
+            d = d.wrapping_mul(10);
+        }
+        (q + n as f64 / d as f64, &s[digits..])
+    }
+    let mut specs: Vec<(&[u8], f64)> = Vec::new();
+    for value in req.headers.get_all(http::header::ACCEPT_ENCODING) {
+        let mut s = value.as_bytes();
+        loop {
+            let len = s.iter().take_while(|&&b| is_token(b) || b == b'/').count();
+            if len == 0 {
+                break;
+            }
+            let (token, rest) = s.split_at(len);
+            let mut q = 1.0;
+            s = skip_space(rest);
+            if let Some(rest) = s.strip_prefix(b";") {
+                let Some(rest) = skip_space(rest).strip_prefix(b"q=") else {
+                    break;
+                };
+                (q, s) = quality(rest);
+                if q < 0.0 {
+                    break;
+                }
+            }
+            specs.push((token, q));
+            match skip_space(s).strip_prefix(b",") {
+                Some(rest) => s = skip_space(rest),
+                None => break,
+            }
+        }
+    }
+    let (mut best, mut best_q) = ("identity", -1.0);
+    for offer in ["identity", "gzip"] {
+        for (value, q) in &specs {
+            if *q > best_q && (*value == b"*" || *value == offer.as_bytes()) {
+                (best, best_q) = (offer, *q);
+            }
+        }
+    }
+    best == "gzip" && best_q != 0.0
 }
 
 pub async fn monitor(app: Arc<App>, req: Req) -> Resp {
@@ -1004,6 +1075,50 @@ mod tests {
             body: body.into(),
             params: Vec::new(),
             remote: ([127, 0, 0, 1], 1).into(),
+        }
+    }
+
+    /// `/metrics` is gzipped as promhttp decides (answers of Go v1.1.2); a weight of 0 or a
+    /// higher weight for identity was ignored, and gzip sent anyway.
+    #[test]
+    fn metrics_compression_like_promhttp() {
+        let accepts = |values: &[&str]| {
+            let mut r = req(&[], Vec::new());
+            for v in values {
+                r.headers.append(
+                    http::header::ACCEPT_ENCODING,
+                    http::HeaderValue::from_str(v).unwrap(),
+                );
+            }
+            metrics_gzip(&r)
+        };
+        for gzip in [
+            &["gzip"][..],
+            &["zstd, gzip"],
+            &["deflate, gzip;q=0.5"],
+            &["gzip;q=1.5"],
+            &["gzip ; q=0.7 , br"],
+            &["identity;q=0.5", "gzip"],
+            &["br;x=1", "gzip"],
+        ] {
+            assert!(accepts(gzip), "{gzip:?}");
+        }
+        for identity in [
+            &[][..],
+            &[""],
+            &["GZIP"],
+            &["x-gzip"],
+            &["zstd"],
+            &["*"],
+            &["*;q=0"],
+            &["gzip;q=0"],
+            &["gzip;q=0.0"],
+            &["gzip;q=0.1, identity;q=1"],
+            &["gzip;q=0.5, *;q=0.6"],
+            &["br;x=1, gzip"],
+            &["gzip;q=2"],
+        ] {
+            assert!(!accepts(identity), "{identity:?}");
         }
     }
 
