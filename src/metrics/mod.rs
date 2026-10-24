@@ -374,8 +374,7 @@ impl ServiceMetrics {
             return;
         }
         let mut st = self.state.lock();
-        let mut gauges = Vec::new();
-        for (topic, data) in st.by_topic.iter_mut() {
+        for data in st.by_topic.values_mut() {
             let deleted = data.jobs.jobs_counter_deleted + data.jobs.jobs_existing;
             data.jobs = JobMetrics {
                 jobs_counter_deleted: deleted,
@@ -384,14 +383,11 @@ impl ServiceMetrics {
             data.stats.total_jobs = 0;
             data.stats.active_jobs = 0;
             data.stats.success_rate = 0.0;
-            gauges.push((topic.clone(), data.jobs.clone()));
         }
         st.resources.clear();
         drop(st);
         if let Some(p) = &self.prom {
-            for (t, m) in gauges {
-                p.set_gauges(&t, &m);
-            }
+            p.zero_job_status();
         }
     }
 
@@ -644,6 +640,22 @@ mod tests {
             JobState::Created,
         );
         step(&m, &mut j, events::PENDING, 2, ServiceEvent::JobPending);
+        let e = new_job("", 3);
+        m.on_job_event(
+            &e,
+            ServiceEvent::JobCreated,
+            JobState::NoState,
+            JobState::Created,
+        );
+        m.empty_poll("pulled");
+        let series = |status: &str, topic: &str| {
+            let text = String::from_utf8(m.prom().unwrap().encode().0).unwrap();
+            let name = format!("job_status{{status=\"{status}\",topic=\"{topic}\"}} ");
+            text.lines()
+                .find_map(|l| l.strip_prefix(&name))
+                .map(str::to_string)
+        };
+        assert_eq!(series("Pending", "t").as_deref(), Some("1"));
         m.on_delete_all();
         let jm = m.job_metrics("t");
         assert_eq!(
@@ -655,6 +667,11 @@ mod tests {
             (0, 0, 1)
         );
         assert_eq!(m.topic_stats("t").total_jobs, 0);
+        // the Prometheus gauges follow (Go v1.1.2 kept the old values)
+        assert_eq!(series("Pending", "t").as_deref(), Some("0"));
+        assert_eq!(series("Existing", "t").as_deref(), Some("0"));
+        assert_eq!(series("Created", "").as_deref(), Some("0"));
+        assert_eq!(series("Existing", "pulled"), None);
     }
 
     // Port of TestServiceMetrics_NotifyJobEvent and _UpdateMetricsFromJobHistory.

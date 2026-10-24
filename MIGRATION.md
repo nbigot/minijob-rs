@@ -171,7 +171,9 @@ these bugs too; where its behavior changed, this version follows it (see
   - `resourcesLockedCount` decreases when locks are released (Go increased it);
   - jobs loaded at startup count in `totalJobs` and `activeJobs` (Go reported
     18446744073709551615 after a restart);
-  - deleting all jobs resets the topic statistics;
+  - deleting all jobs resets the topic statistics, and sets the `job_status` gauges of
+    `/metrics` to 0 (Go v1.1 kept their previous values until the next event of each
+    topic);
   - a topic is listed once (Go could list it twice).
 - The hidden event is named `Hidden` in the `job_events` metric, `jobActivity.hidden` and the
   event log (Go: `other`, so `hidden` stayed 0).
