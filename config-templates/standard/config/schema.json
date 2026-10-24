@@ -91,7 +91,7 @@
     "callbackUrl": {
       "$id": "#/properties/callbackUrl",
       "type": "string",
-      "title": "URL called when the job completes (optional)",
+      "title": "URL called when the job ends (succeeded, canceled, or failed after its last retry)",
       "examples": ["https://api.example.com/webhook"]
     }
   }

@@ -11,12 +11,14 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 struct Check<'a> {
-    #[serde(rename = "HTTP", skip_serializing_if = "str::is_empty")]
-    http: &'a str,
+    #[serde(rename = "CheckID", skip_serializing_if = "str::is_empty")]
+    check_id: &'a str,
     #[serde(rename = "Interval", skip_serializing_if = "str::is_empty")]
     interval: &'a str,
     #[serde(rename = "Timeout", skip_serializing_if = "str::is_empty")]
     timeout: &'a str,
+    #[serde(rename = "HTTP", skip_serializing_if = "str::is_empty")]
+    http: &'a str,
 }
 
 #[derive(Serialize)]
@@ -31,8 +33,9 @@ struct Registration<'a> {
     port: i64,
     #[serde(rename = "Address", skip_serializing_if = "str::is_empty")]
     address: &'a str,
+    /// `null` when `healthCheck.enable` is false, as in Go.
     #[serde(rename = "Check")]
-    check: Check<'a>,
+    check: Option<Check<'a>>,
     #[serde(rename = "Namespace", skip_serializing_if = "str::is_empty")]
     namespace: &'a str,
     #[serde(rename = "Partition", skip_serializing_if = "str::is_empty")]
@@ -147,7 +150,8 @@ impl Consul {
         ))
     }
 
-    /// `RegisterConsul`.
+    /// `RegisterConsul`: the HTTP check is registered only with `healthCheck.enable`, with its
+    /// `checkId`.
     pub async fn register(&self) -> Result<(), String> {
         let c = &self.cfg;
         let reg = Registration {
@@ -156,11 +160,12 @@ impl Consul {
             tags: c.service.tags.as_deref(),
             port: c.server.port,
             address: &c.server.address,
-            check: Check {
-                http: &c.health_check.url,
+            check: c.health_check.enable.then(|| Check {
+                check_id: &c.health_check.check_id,
                 interval: &c.health_check.interval,
                 timeout: &c.health_check.timeout,
-            },
+                http: &c.health_check.url,
+            }),
             namespace: &c.service.namespace,
             partition: &c.service.partition,
         };
@@ -226,10 +231,10 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// A Consul agent that answers 200 and records `(request line, X-Consul-Token)`.
+    /// A Consul agent that answers 200 and records `(request line, X-Consul-Token, body)`.
     async fn agent() -> (
         String,
-        tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+        tokio::sync::mpsc::UnboundedReceiver<(String, String, String)>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -238,20 +243,33 @@ mod tests {
             while let Ok((mut tcp, _)) = listener.accept().await {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let end = loop {
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                    match tcp.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break buf.len(),
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+                let header = |name: &str| {
+                    head.lines()
+                        .find_map(|l| l.strip_prefix(name))
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let line = head.lines().next().unwrap_or("").to_string();
+                let token = header("x-consul-token: ");
+                let length: usize = header("content-length: ").parse().unwrap_or(0);
+                while buf.len() < end + length {
                     match tcp.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => buf.extend_from_slice(&chunk[..n]),
                     }
                 }
-                let head = String::from_utf8_lossy(&buf).into_owned();
-                let line = head.lines().next().unwrap_or("").to_string();
-                let token = head
-                    .lines()
-                    .find_map(|l| l.strip_prefix("x-consul-token: "))
-                    .unwrap_or("")
-                    .to_string();
-                let _ = tx.send((line, token));
+                let body = String::from_utf8_lossy(&buf[end..]).into_owned();
+                let _ = tx.send((line, token, body));
                 let _ = tcp
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     .await;
@@ -273,18 +291,61 @@ mod tests {
         let consul = Consul::with_env(&cfg, Logger::nop(), env).unwrap();
         consul.register().await.unwrap();
         consul.deregister().await;
-        let (line, token) = rx.recv().await.unwrap();
+        let (line, token, _) = rx.recv().await.unwrap();
         assert!(
             line.starts_with("PUT /v1/agent/service/register "),
             "{line}"
         );
         assert_eq!(token, "secret");
-        let (line, token) = rx.recv().await.unwrap();
+        let (line, token, _) = rx.recv().await.unwrap();
         assert!(
             line.starts_with("PUT /v1/agent/service/deregister/minijob "),
             "{line}"
         );
         assert_eq!(token, "secret");
+    }
+
+    /// The HTTP check is registered only with `healthCheck.enable`, with its `checkId` (Go
+    /// registered it always, without its id).
+    #[tokio::test]
+    async fn health_check_enable_and_id() {
+        let (addr, mut rx) = agent().await;
+        let mut cfg = ConsulConfig::default();
+        cfg.service.id = "minijob".into();
+        cfg.service.name = "minijob".into();
+        cfg.server.port = 8080;
+        cfg.health_check.check_id = "alive".into();
+        cfg.health_check.url = "http://127.0.0.1:8080/livez".into();
+        cfg.health_check.interval = "10s".into();
+        cfg.health_check.timeout = "5s".into();
+        let env = |name: &str| match name {
+            "CONSUL_HTTP_ADDR" => addr.clone(),
+            _ => String::new(),
+        };
+        Consul::with_env(&cfg, Logger::nop(), env)
+            .unwrap()
+            .register()
+            .await
+            .unwrap();
+        let (_, _, body) = rx.recv().await.unwrap();
+        assert_eq!(
+            body,
+            r#"{"ID":"minijob","Name":"minijob","Port":8080,"Check":null}"#
+        );
+        cfg.health_check.enable = true;
+        Consul::with_env(&cfg, Logger::nop(), env)
+            .unwrap()
+            .register()
+            .await
+            .unwrap();
+        let (_, _, body) = rx.recv().await.unwrap();
+        assert_eq!(
+            body,
+            concat!(
+                r#"{"ID":"minijob","Name":"minijob","Port":8080,"Check":{"CheckID":"alive","#,
+                r#""Interval":"10s","Timeout":"5s","HTTP":"http://127.0.0.1:8080/livez"}}"#
+            )
+        );
     }
 
     /// A Consul agent that answers each request with `response`, or closes the connection.

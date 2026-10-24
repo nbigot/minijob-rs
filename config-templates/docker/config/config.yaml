@@ -19,9 +19,10 @@ jobs:
     retryPolicy:
         maxRetry: 3
         backoffStrategy:
-            base: 2
+            type: 2  # Delay before a retry: 0 constant (base), 1 linear (base * failures), 2 exponential (base * factor^failures)
+            base: 1000  # Base delay in milliseconds (1 second)
             factor: 2
-            maxDuration: 60
+            maxDuration: 60000  # Maximum delay in milliseconds (1 minute), for the linear and exponential types
     defaultVisibilityTimeout: 60  # Default visibility timeout in seconds (1 minute)
     maxVisibilityTimeout: 86400 # Maximum visibility timeout in seconds (24 hours)
 backend:
@@ -95,7 +96,7 @@ consul:
         namespace: ""
         partition: ""
     healthCheck:
-        enable: false
+        enable: true  # register this HTTP check with the service
         checkId: "alive"
         interval: "10s"
         timeout: "5s"

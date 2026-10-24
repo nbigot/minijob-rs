@@ -13,9 +13,10 @@ jobs:
     retryPolicy:
         maxRetry: 3
         backoffStrategy:
-            base: 1
+            type: 0  # Delay before a retry: 0 constant (base), 1 linear (base * failures), 2 exponential (base * factor^failures)
+            base: 1  # Base delay in milliseconds
             factor: 2
-            maxDuration: 2
+            maxDuration: 2  # Maximum delay in milliseconds, for the linear and exponential types
     defaultVisibilityTimeout: 30  # Default visibility timeout in seconds (30 sec)
     maxVisibilityTimeout: 600 # Maximum visibility timeout in seconds (10 minutes)
 backend:
