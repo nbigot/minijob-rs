@@ -693,6 +693,10 @@ mod tests {
             (1, 0, 1)
         );
         assert_eq!(m.topic_stats("t").active_jobs, 1);
+        // a loaded job is in the gauges at once (Go v1.1.2: after the next event)
+        let text = String::from_utf8(m.prom().unwrap().encode().0).unwrap();
+        assert!(text.contains("job_status{status=\"Running\",topic=\"t\"} 1\n"));
+        assert!(text.contains("job_status{status=\"Existing\",topic=\"t\"} 1\n"));
         step(
             &m,
             &mut j,

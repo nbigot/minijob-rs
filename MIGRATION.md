@@ -170,7 +170,9 @@ these bugs too; where its behavior changed, this version follows it (see
     `jobsCounterDeleted`/`deletedJobs` (Go never counted single deletes);
   - `resourcesLockedCount` decreases when locks are released (Go increased it);
   - jobs loaded at startup count in `totalJobs` and `activeJobs` (Go reported
-    18446744073709551615 after a restart);
+    18446744073709551615 after a restart), and in the `job_status` gauges of `/metrics`
+    (Go v1.1 had no `job_status` series after a restart, until the next event of each
+    topic);
   - deleting all jobs resets the topic statistics, and sets the `job_status` gauges of
     `/metrics` to 0 (Go v1.1 kept their previous values until the next event of each
     topic);
