@@ -830,9 +830,9 @@ fn access_log_lines() {
 
 /// The backend's `notify event` debug lines (`backend.logVerbosity` 2 and more), as Go's
 /// inMemory provider writes them: `jobbackendprovider.Event` in its member order, one line
-/// per resource of a job that releases them, none for a visibility timeout change. With
-/// `jobs.logVerbosity` 3, the service logs each one again (`Event received`), after the
-/// verbose line of the change.
+/// per resource of a job that releases them, `EventJobUpdated` (16) for a visibility timeout
+/// change (Go v1.1.2). With `jobs.logVerbosity` 3, the service logs each one again
+/// (`Event received`), after the verbose line of the change.
 #[test]
 fn backend_notify_events() {
     let mut s = Server::start_with(T, |c| {
@@ -863,6 +863,7 @@ fn backend_notify_events() {
         event(2, &id, None),
         event(3, &id, None),
         event(5, &id, None),
+        event(16, &id, None),
         event(14, &id, Some("r1")),
         event(14, &id, Some("r2")),
         event(6, &id, None),
