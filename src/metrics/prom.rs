@@ -185,6 +185,27 @@ impl Prom {
                 .set(v as f64);
         }
     }
+
+    /// `ResetAllGauges`: every existing `job_status` series set to 0, labels kept. Topics
+    /// without series (only pulled) get none. Go also dropped the series of the empty topic.
+    pub fn zero_job_status(&self) {
+        use prometheus::core::Collector;
+        for family in self.job_status.collect() {
+            for metric in family.get_metric() {
+                let label = |name: &str| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .find(|l| l.name() == name)
+                        .map(|l| l.value().to_string())
+                        .unwrap_or_default()
+                };
+                self.job_status
+                    .with_label_values(&[label("status"), label("topic")])
+                    .set(0.0);
+            }
+        }
+    }
 }
 
 impl Default for Prom {
