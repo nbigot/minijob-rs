@@ -11,6 +11,7 @@ pub mod eventlog;
 pub mod events;
 pub mod gojson;
 pub mod gomail;
+pub mod gonet;
 pub mod goregex;
 pub mod gourl;
 pub mod httperr;

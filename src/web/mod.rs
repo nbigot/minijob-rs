@@ -284,30 +284,6 @@ async fn serve(
     Ok(resp)
 }
 
-/// Splits a Go `host:port` address; IPv4 only, like Fiber's default `tcp4` network.
-async fn resolve_listen_address(address: &str) -> Result<SocketAddr, String> {
-    let err = |m: &str| format!("listen tcp4 {address}: {m}");
-    let (host, port) = address
-        .rsplit_once(':')
-        .ok_or_else(|| err("missing port in address"))?;
-    let port: u16 = if port.is_empty() {
-        0
-    } else {
-        port.parse().map_err(|_| err("unknown port"))?
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.is_empty() {
-        return Ok(SocketAddr::from(([0, 0, 0, 0], port)));
-    }
-    let addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| err(&e.to_string()))?;
-    addrs
-        .into_iter()
-        .find(SocketAddr::is_ipv4)
-        .ok_or_else(|| err(&format!("address {host}: no suitable address found")))
-}
-
 /// Waits for SIGINT/SIGTERM/SIGQUIT (stop) or SIGHUP (restart); Ctrl+C / Ctrl+Break on Windows.
 async fn wait_signal(logger: &Logger) -> Control {
     #[cfg(unix)]
@@ -519,13 +495,7 @@ pub async fn run(cfg: Arc<Config>, version: &str, logger: Logger) -> Result<Outc
                 log::s("address", &address),
             ],
         );
-        let listener = match resolve_listen_address(&address).await {
-            Ok(a) => TcpListener::bind(a)
-                .await
-                .map_err(|e| format!("listen tcp4 {address}: {e}")),
-            Err(e) => Err(e),
-        };
-        match listener {
+        match crate::gonet::listen_tcp4(&address).await {
             Err(e) => {
                 let _ = listen_err_tx.send(e);
             }

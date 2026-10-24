@@ -400,6 +400,57 @@ pub fn go_open_error(path: &str, err: &std::io::Error) -> String {
 
 /// A Go `*fs.PathError` message: `<op> <path>: <description>` (`mkdir`, `open`, `write`...).
 pub fn go_path_error(op: &str, path: &str, err: &std::io::Error) -> String {
+    format!("{op} {path}: {}", go_errno_text(err))
+}
+
+/// Go's text for an OS error (`syscall.Errno.Error()`). Go asks Windows for the English
+/// message, while Rust gets it in the language of the system; Go has its own table on Unix,
+/// in lowercase, where musl words some errors differently (Linux errno numbers). The common errors are written
+/// here as Go writes them, the others are those of the system.
+pub fn go_errno_text(err: &std::io::Error) -> String {
+    #[cfg(windows)]
+    let known = match err.raw_os_error() {
+        Some(2) => Some("The system cannot find the file specified."),
+        Some(3) => Some("The system cannot find the path specified."),
+        Some(5) => Some("Access is denied."),
+        Some(32) => {
+            Some("The process cannot access the file because it is being used by another process.")
+        }
+        Some(112) => Some("There is not enough space on the disk."),
+        Some(123) => Some("The filename, directory name, or volume label syntax is incorrect."),
+        Some(183) => Some("Cannot create a file when that file already exists."),
+        Some(267) => Some("The directory name is invalid."),
+        Some(10013) => Some(
+            "An attempt was made to access a socket in a way forbidden by its access permissions.",
+        ),
+        Some(10048) => Some(
+            "Only one usage of each socket address (protocol/network address/port) is normally permitted.",
+        ),
+        Some(10049) => Some("The requested address is not valid in its context."),
+        Some(10061) => {
+            Some("No connection could be made because the target machine actively refused it.")
+        }
+        _ => None,
+    };
+    #[cfg(target_os = "linux")]
+    let known = match err.raw_os_error() {
+        Some(2) => Some("no such file or directory"),
+        Some(13) => Some("permission denied"),
+        Some(17) => Some("file exists"),
+        Some(20) => Some("not a directory"),
+        Some(21) => Some("is a directory"),
+        Some(28) => Some("no space left on device"),
+        Some(30) => Some("read-only file system"),
+        Some(98) => Some("address already in use"),
+        Some(99) => Some("cannot assign requested address"),
+        Some(111) => Some("connection refused"),
+        _ => None,
+    };
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let known: Option<&str> = None;
+    if let Some(text) = known {
+        return text.to_string();
+    }
     let mut msg = err.to_string();
     if let Some(i) = msg.find(" (os error ") {
         msg.truncate(i);
@@ -411,7 +462,7 @@ pub fn go_path_error(op: &str, path: &str, err: &std::io::Error) -> String {
             msg = first.to_lowercase().collect::<String>() + c.as_str();
         }
     }
-    format!("{op} {path}: {msg}")
+    msg
 }
 
 /// Loads the configuration file (`config.LoadConfig`). The error text is printed by `main`.
