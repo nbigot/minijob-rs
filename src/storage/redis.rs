@@ -138,7 +138,7 @@ impl RedisBackend {
             .set_number_of_retries(self.opts.retries());
         let mut conn = ConnectionManager::new_with_config(client, config)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| go_error(&e))?;
         if !self.opts.client_name.is_empty() {
             let _: Result<(), _> = redis::cmd("CLIENT")
                 .arg("SETNAME")
@@ -170,7 +170,11 @@ impl RedisBackend {
         if let Err(e) = r {
             self.logger.warn(
                 "Cannot enable Redis keyspace notifications",
-                &[log::s("topic", "backendProvider"), log::err(e)],
+                &[
+                    log::s("topic", "backendProvider"),
+                    log::s("method", "Init"),
+                    log::err(go_error(&e)),
+                ],
             );
         }
         let jobs = self.scan_jobs(conn.clone()).await?;
@@ -195,8 +199,10 @@ impl RedisBackend {
                 .query_async(&mut conn)
                 .await
                 .map_err(|e| {
-                    self.logger
-                        .error("Error getting job keys from Redis", &[log::err(&e)]);
+                    self.logger.error(
+                        "Error getting job keys from Redis",
+                        &[log::err(go_error(&e))],
+                    );
                     "cannot load jobs".to_string()
                 })?;
             keys.extend(batch);
@@ -215,7 +221,7 @@ impl RedisBackend {
                 .await
                 .map_err(|e| {
                     self.logger
-                        .error("Error getting job from Redis", &[log::err(&e)]);
+                        .error("Error getting job from Redis", &[log::err(go_error(&e))]);
                     "cannot load job".to_string()
                 })?;
             // A key that expired since SCAN is skipped.
@@ -271,7 +277,8 @@ impl RedisBackend {
         match ping {
             Ok(_) => self.writes_ok.load(Ordering::Relaxed),
             Err(e) => {
-                self.logger.error("Error pinging Redis", &[log::err(e)]);
+                self.logger
+                    .error("Error pinging Redis", &[log::err(go_error(&e))]);
                 false
             }
         }
@@ -290,9 +297,27 @@ impl RedisBackend {
             h.abort();
             self.logger.error(
                 "Pending Redis writes not flushed at shutdown",
-                &[log::s("topic", "backendProvider")],
+                &[log::s("topic", "backendProvider"), log::s("method", "Stop")],
             );
         }
+    }
+}
+
+/// A Redis error worded as go-redis words it: a server error is the reply as sent
+/// (`NOPERM User ...`, `OOM command not allowed ...`), and a pipeline fails with the error of
+/// its first failed command (redis-rs: `NoPerm: User ...`, `Pipeline failure: [(Index 0,
+/// error: ...)]`).
+fn go_error(e: &redis::RedisError) -> String {
+    let first = e
+        .clone()
+        .into_server_errors()
+        .and_then(|errors| errors.first().map(|(_, err)| err.clone()));
+    match first {
+        Some(err) => match err.details() {
+            Some(detail) => format!("{} {detail}", err.code()),
+            None => err.code().to_string(),
+        },
+        None => e.to_string(),
     }
 }
 
@@ -408,7 +433,11 @@ async fn writer(
             Err(e) => {
                 logger.error(
                     "Error saving job to Redis",
-                    &[log::s("topic", "backendProvider"), log::err(&e)],
+                    &[
+                        log::s("topic", "backendProvider"),
+                        log::s("method", "SaveJob"),
+                        log::err(go_error(&e)),
+                    ],
                 );
                 // Every failure is retried: Redis unreachable, but also a rejected write
                 // (out of memory, read-only replica during a failover); the job stays in
