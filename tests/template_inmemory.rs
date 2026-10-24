@@ -990,6 +990,40 @@ fn command_line_and_exit_status() {
     let (st, out, _) = run_binary(&["-config", cfg2.to_str().unwrap()]);
     assert_eq!(st.code(), Some(1), "{out}");
     assert!(out.contains("Web server stopped with error"));
+    // Fiber's wording of Go's net.Listen error
+    let bind = format!(
+        "\"error\":\"failed to listen: listen tcp4 127.0.0.1:{}: bind: ",
+        s.port
+    );
+    assert!(out.contains(&bind), "{out}");
+    let cfg4 = dir.path().join("schema-missing.yaml");
+    std::fs::write(
+        &cfg4,
+        std::fs::read_to_string(&s.config_path)
+            .unwrap()
+            .replace(
+                "enable: false  # Enable JSON",
+                "enable: true  # Enable JSON",
+            )
+            .replace(
+                "path: \"\" # Path to JSON",
+                "path: \"missing-schema.json\" # Path to JSON",
+            ),
+    )
+    .unwrap();
+    let (st, out, _) = run_binary(&["-config", cfg4.to_str().unwrap()]);
+    assert_eq!(st.code(), Some(1), "{out}");
+    let missing = if cfg!(windows) {
+        "The system cannot find the file specified."
+    } else {
+        "no such file or directory"
+    };
+    assert!(
+        out.contains(&format!(
+            "\"error\":\"error reading schema file: open missing-schema.json: {missing}\""
+        )),
+        "{out}"
+    );
     let cfg3 = dir.path().join("bad-backend.yaml");
     std::fs::write(
         &cfg3,
