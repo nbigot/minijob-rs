@@ -499,40 +499,26 @@ impl Service {
         let mut fx = Fx::default();
         let result = {
             let mut st = self.state.write();
-            let max = self.cfg.jobs.max_allowed_jobs;
-            if max > 0 && st.jobs.len() as u64 >= max {
-                self.logger.error(
-                    "Cannot create job",
-                    &[
-                        log::s("topic", "service"),
-                        log::s("method", "CreateJob"),
-                        log::err("cannot create job, limit reached"),
-                    ],
-                );
-                Err(ApiError::new(
-                    503,
-                    codes::CANT_CREATE_JOB,
-                    "cannot create job",
-                ))
-            } else {
-                match parsed {
-                    Err(e) => {
-                        self.logger.error(
-                            "Cannot create job",
-                            &[
-                                log::s("topic", "service"),
-                                log::s("method", "CreateJob"),
-                                log::err("cannot create job from request"),
-                            ],
-                        );
-                        Err(ApiError::new(
-                            400,
-                            codes::CANT_CREATE_JOB,
-                            "cannot create job from request",
-                        )
-                        .cause(e.to_string()))
-                    }
-                    Ok(req) => self.finalize_creation(&mut st, req.into_job(now_ms()), &mut fx),
+            match (self.check_max_allowed_jobs(&st, "CreateJob"), parsed) {
+                (Err(e), _) => Err(e),
+                (Ok(()), Err(e)) => {
+                    self.logger.error(
+                        "Cannot create job",
+                        &[
+                            log::s("topic", "service"),
+                            log::s("method", "CreateJob"),
+                            log::err("cannot create job from request"),
+                        ],
+                    );
+                    Err(ApiError::new(
+                        400,
+                        codes::CANT_CREATE_JOB,
+                        "cannot create job from request",
+                    )
+                    .cause(e.to_string()))
+                }
+                (Ok(()), Ok(req)) => {
+                    self.finalize_creation(&mut st, req.into_job(now_ms()), &mut fx)
                 }
             }
         };
@@ -540,7 +526,29 @@ impl Service {
         result
     }
 
-    /// `POST /api/v1/job/{id}/clone` (`CloneJob`; `maxAllowedJobs` is not checked, as in Go).
+    /// `checkMaxAllowedJobsLocked`: 503 when `jobs.maxAllowedJobs` jobs exist.
+    fn check_max_allowed_jobs(&self, st: &State, method: &str) -> Result<(), ApiError> {
+        let max = self.cfg.jobs.max_allowed_jobs;
+        if max == 0 || (st.jobs.len() as u64) < max {
+            return Ok(());
+        }
+        self.logger.error(
+            "Cannot create job",
+            &[
+                log::s("topic", "service"),
+                log::s("method", method),
+                log::err("cannot create job, limit reached"),
+            ],
+        );
+        Err(ApiError::new(
+            503,
+            codes::CANT_CREATE_JOB,
+            "cannot create job",
+        ))
+    }
+
+    /// `POST /api/v1/job/{id}/clone` (`CloneJob`). The clone is a new job: refused like a
+    /// creation when `jobs.maxAllowedJobs` jobs exist (an unknown job is answered first).
     pub async fn clone_job(&self, id: Uuid) -> Result<Arc<Job>, ApiError> {
         let mut fx = Fx::default();
         let result = {
@@ -550,7 +558,10 @@ impl Service {
                     self.log_error("Cannot clone job", "CloneJob", id);
                     Err(not_found(codes::CANT_CLONE_JOB, id))
                 }
-                Some(clone) => self.finalize_creation(&mut st, clone, &mut fx),
+                Some(clone) => match self.check_max_allowed_jobs(&st, "CloneJob") {
+                    Err(e) => Err(e),
+                    Ok(()) => self.finalize_creation(&mut st, clone, &mut fx),
+                },
             }
         };
         fx.finish(self).await;

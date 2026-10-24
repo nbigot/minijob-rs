@@ -187,6 +187,26 @@ fn create_errors() {
         r.json(),
         json!({"error":"cannot create job","code":1002,"jobUUID":ZERO})
     );
+    // A clone is a new job: same limit (Go v1.1.2); an unknown job is answered first.
+    let id = r#"0190e951-c29a-70aa-ba59-18be4abe97a1"#;
+    let r = s.post_json(&format!("/api/v1/job/{id}/clone"), "");
+    assert_eq!(
+        (r.status, r.json()),
+        (
+            400,
+            json!({"error":"job not found","code":1007,"jobUUID":id})
+        )
+    );
+    let jobs = s.get("/api/v1/jobs/").json();
+    let existing = jobs["jobs"][0]["id"].as_str().unwrap().to_string();
+    let r = s.post_json(&format!("/api/v1/job/{existing}/clone"), "");
+    assert_eq!(
+        (r.status, r.json()),
+        (
+            503,
+            json!({"error":"cannot create job","code":1002,"jobUUID":ZERO})
+        )
+    );
 }
 
 #[test]

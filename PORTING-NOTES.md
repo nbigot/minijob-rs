@@ -191,7 +191,7 @@ Success envelopes: `{"code":200,"message":"success", ...}` (`web/apiresult.go`).
 | `POST /api/v1/job/:jobuuid/cancel` | CancelJob | | success | 400/1008 `job not found`, `job is not running` |
 | `POST /api/v1/job/:jobuuid/fail` | FailJob | | `message`: `success`, or `job reached max retry` when terminated | 400/1010 `job not found`, `job is not running` |
 | `POST /api/v1/job/:jobuuid/visibilitytimeout` | ChangeVisibilityTimeoutJob | query `visibilitytimeout` (same rule as pull) | success | 400/1021; 400/**1007** `job not found` (bug B16c); no state check |
-| `POST /api/v1/job/:jobuuid/clone` | CloneJob | | `{code,message,job}` (new job) | 400/1007 `job not found`; maxAllowedJobs is **not** checked |
+| `POST /api/v1/job/:jobuuid/clone` | CloneJob | | `{code,message,job}` (new job) | 400/1007 `job not found`; maxAllowedJobs is **not** checked (v1.1.2: 503/1002 like a creation, after the 1007) |
 | `DELETE /api/v1/job/:jobuuid` | DeleteJob | | success | **400**/1003 `job not found` |
 | `GET /api/v1/jobs/` | GetJobs | `page` (1, 1..10000), `limit` (10, 1..1000), `status`, `topic`, `sort`, `search` | `{code,message,jobs,total,page,limit,totalpages}` | 400/1021 |
 | `GET /api/v1/jobs/all` | GetAllJobs | | `{code,message,jobs}` (map order: random) | |

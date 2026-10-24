@@ -104,9 +104,12 @@ these bugs too; where its behavior changed, this version follows it (see
   `jobs.maxAllowedJobs`. Go stored the job in memory without saving it (in-memory) or
   ignored the limit (Redis).
 - Changing the visibility timeout of a job is saved to Redis (Go only kept it in memory).
+- Cloning a job counts against `jobs.maxAllowedJobs` like a creation (`503`
+  `{"error":"cannot create job","code":1002}`, after the `job not found` answer for an
+  unknown job); Go v1.0.0 created clones beyond the limit.
 - Unchanged on purpose: an empty `topic` on pull only matches jobs without topic (`*` matches
   every topic); `visibilitytimeout` on an unknown job answers code 1007; deleting an unknown
-  job answers 400; cloning does not check `jobs.maxAllowedJobs`.
+  job answers 400.
 
 ## Scheduling and resource locks
 
