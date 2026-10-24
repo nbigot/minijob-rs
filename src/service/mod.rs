@@ -263,7 +263,15 @@ impl Service {
     }
 
     /// Restores loaded jobs (`LoadJobs`). The backend is not notified.
-    fn restore(&self, jobs: Vec<Job>) {
+    ///
+    /// The jobs are taken in id order, which is the creation order (Go v1.1.2 locks the
+    /// resources in this order: of two jobs claiming a resource, the last created holds it at
+    /// every start). Of two jobs with the same id (a key written twice in the jobs file), the
+    /// last one is kept, as Go's decoding into a map does.
+    fn restore(&self, mut jobs: Vec<Job>) {
+        jobs.reverse();
+        jobs.sort_by_key(|j| j.id);
+        jobs.dedup_by_key(|j| j.id);
         let now = now_ms();
         let mut fx = Fx::default();
         let mut st = self.state.write();
@@ -1456,6 +1464,66 @@ logger: {level: error, encoding: json}
         svc.succeed(id).await.unwrap();
         assert!(svc.locked_resources().is_empty());
         assert_eq!(locked_count(&svc, "r"), 0);
+    }
+
+    fn stored_job(id: Uuid, topic: &str, events: &[&str]) -> Job {
+        let mut job = Job {
+            topic: topic.into(),
+            lock_resources: Some(vec!["a".into()]),
+            visibility_timeout: 60,
+            ..Default::default()
+        };
+        job.init(id, now_ms());
+        for e in events {
+            job.add_event(e, now_ms());
+        }
+        job
+    }
+
+    /// Of two running jobs claiming a resource (its lock was released through the admin API
+    /// and taken by the other), the last created holds it at every start, whatever the order
+    /// of the stored jobs (Go v1.1.2).
+    #[tokio::test]
+    async fn restored_lock_owner_is_the_last_created_job() {
+        let running = [events::PENDING, events::ENQUEUE, events::START];
+        let (first, last) = (Uuid::now_v7(), Uuid::now_v7());
+        for stored in [[first, last], [last, first]] {
+            let svc = service(-1, -1).await;
+            svc.restore(
+                stored
+                    .iter()
+                    .map(|&id| stored_job(id, "r", &running))
+                    .collect(),
+            );
+            assert_eq!(svc.locked_resources(), BTreeMap::from([("a".into(), last)]));
+            assert_eq!(locked_count(&svc, "r"), 1);
+        }
+    }
+
+    /// A job written twice in the jobs file is restored once, from its last copy (Go decodes
+    /// the file into a map). The first copy was indexed too: a pending copy queued the job
+    /// again while it was running.
+    #[tokio::test]
+    async fn a_job_stored_twice_is_restored_once() {
+        let svc = service(-1, -1).await;
+        let id = Uuid::now_v7();
+        svc.restore(vec![
+            stored_job(id, "old", &[events::PENDING]),
+            stored_job(
+                id,
+                "new",
+                &[events::PENDING, events::ENQUEUE, events::START],
+            ),
+        ]);
+        svc.tick().await;
+        let job = svc.get_job(id).unwrap();
+        assert_eq!(
+            (job.topic.as_str(), job.state()),
+            ("new", JobState::Running)
+        );
+        assert_eq!(svc.jobs_count(), 1);
+        svc.succeed(id).await.unwrap();
+        assert!(svc.locked_resources().is_empty());
     }
 
     /// Retry without delay while the job's resource has been unlocked and taken by another
