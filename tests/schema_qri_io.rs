@@ -22,12 +22,26 @@ struct Case {
 
 #[test]
 fn same_errors_as_qri_io() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/qri-io-schema-cases.json"
-    );
+    let checked = check_cases("qri-io-schema-cases.json");
+    assert!(checked > 3000, "{checked} instances checked");
+}
+
+/// Schemas whose references loop or recurse (`$ref` to `""`, `#`, `#/items/0`...,
+/// `$recursiveRef`, `$recursiveAnchor`), validated by Go minijob v1.1.2: qri-io with its
+/// loop-safe `$ref` and `definitions` as `$defs`, built with Go 1.25, a fresh schema for
+/// each instance (qri-io keeps the references it resolved). `fixtures/go-schema-ref-loops.json`
+/// leaves out `$anchor` references, `contains` messages and the schemas Go refuses.
+#[test]
+fn reference_loops_like_go() {
+    let checked = check_cases("go-schema-ref-loops.json");
+    assert!(checked >= 1200, "{checked} instances checked");
+}
+
+/// Checks the cases of a fixture; returns the number of instances checked.
+fn check_cases(fixture: &str) -> usize {
+    let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
     let cases: Vec<Case> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert!(cases.len() > 300);
+    assert!(cases.len() >= 200);
     let mut checked = 0;
     for (i, case) in cases.iter().enumerate() {
         let schema = Schema::compile(case.schema.as_bytes());
@@ -55,7 +69,7 @@ fn same_errors_as_qri_io() {
             checked += 1;
         }
     }
-    assert!(checked > 3000, "{checked} instances checked");
+    checked
 }
 
 #[derive(Deserialize)]

@@ -7,10 +7,13 @@
 //!   use, a data race between concurrent requests);
 //! - members of an object are evaluated in key order (Go iterates maps in random order, so
 //!   the order of several errors varied between requests);
-//! - `$ref` is resolved inside the schema file only, including draft-07 `definitions` (qri-io
-//!   ignores `definitions`, so such references always failed); remote references are not
-//!   downloaded and fail like an unreachable one does in Go;
+//! - `$ref` is resolved inside the schema file only: remote references are not downloaded and
+//!   fail like an unreachable one does in Go; `#name` finds an `$anchor`, and a pointer may
+//!   go through members that are not keywords (qri-io resolved neither);
 //! - the details of `format` errors that quote Go library messages are approximations.
+//!
+//! As in Go v1.1.2, draft-07 `definitions` is an alias of `$defs`, and a `$ref` that loops on
+//! the same value adds no constraint (qri-io recursed until the stack overflowed).
 
 use crate::gojson::decode::{Entries, go_text, match_field, members};
 use crate::gojson::{fmt_float_v, to_vec};
@@ -106,7 +109,22 @@ type NodeId = usize;
 
 #[derive(Debug)]
 enum Kw {
-    Ref(String, Option<NodeId>),
+    /// `$ref`: the reference as qri-io keeps it (URL-unescaped, for the messages), its target,
+    /// and the place of the keyword in the document (`site`): Go's loop guard identifies a
+    /// reference by its keyword, which qri-io decodes once.
+    Ref {
+        reference: String,
+        target: Option<NodeId>,
+        site: usize,
+    },
+    /// `$recursiveRef` (`site` as for `$ref`).
+    RecursiveRef {
+        reference: String,
+        target: Option<NodeId>,
+        site: usize,
+    },
+    /// `$recursiveAnchor`, whatever its value.
+    RecursiveAnchor,
     Type(Vec<String>),
     Enum(Vec<(Value, String)>),
     Const(Value),
@@ -172,12 +190,43 @@ enum Node {
 pub struct Schema {
     nodes: Vec<Node>,
     root: NodeId,
+    /// The root has an `$id` that gives the validation a base URI (qri-io `docPath`).
+    base_uri: bool,
 }
 
 struct Compiler<'a> {
     root_text: &'a str,
     nodes: Vec<Node>,
     by_pointer: HashMap<String, NodeId>,
+    /// JSON pointer tokens (escaped) of the member being compiled.
+    path: Vec<String>,
+    /// Ids of the reference keywords, by place in the document.
+    sites: HashMap<String, usize>,
+}
+
+fn escape_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+/// A JSON pointer as qri-io's jsonpointer parses it (`/` then tokens, `~1` and `~0` escapes),
+/// in canonical form.
+fn canonical_pointer(pointer: &str) -> Vec<String> {
+    if pointer.is_empty() {
+        return Vec::new();
+    }
+    pointer[1..]
+        .split('/')
+        .map(|t| escape_token(&t.replace("~1", "/").replace("~0", "~")))
+        .collect()
+}
+
+/// qri-io `IsLocalSchemaID`: a `#name` reference.
+fn is_local_schema_id(id: &str) -> bool {
+    let first = id.split('#').next().unwrap_or("");
+    if id.contains('#') && !first.is_empty() && !first.starts_with('#') {
+        return false;
+    }
+    id != "#" && !id.starts_with("#/") && id.contains('#')
 }
 
 fn json_err(prop: &str, e: impl std::fmt::Display) -> String {
@@ -331,10 +380,7 @@ fn eval_pointer<'a>(text: &'a str, pointer: &str) -> Option<&'a str> {
         return Some(text);
     }
     for token in pointer.strip_prefix('/')?.split('/') {
-        let token = percent_encoding::percent_decode_str(token)
-            .decode_utf8_lossy()
-            .replace("~1", "/")
-            .replace("~0", "~");
+        let token = token.replace("~1", "/").replace("~0", "~");
         let raw = current.get();
         current = match raw.trim_start().as_bytes().first() {
             // The last duplicate key wins, as when decoding into a map.
@@ -414,7 +460,10 @@ impl Compiler<'_> {
         let id = self.push(Node::Pending);
         let mut named: Vec<(&str, Kw)> = Vec::new();
         for (name, raw) in &members {
-            if let Some(kw) = self.keyword(name, raw).map_err(|e| json_err(name, e))? {
+            self.path.push(escape_token(name));
+            let kw = self.keyword(name, raw);
+            self.path.pop();
+            if let Some(kw) = kw.map_err(|e| json_err(name, e))? {
                 named.push((
                     KEYWORDS.iter().find(|k| *k == name).copied().unwrap_or(""),
                     kw,
@@ -443,7 +492,13 @@ impl Compiler<'_> {
         go_array(raw, go_type)?
             .unwrap_or_default()
             .into_iter()
-            .map(|v| self.compile_ptr(v))
+            .enumerate()
+            .map(|(i, v)| {
+                self.path.push(i.to_string());
+                let id = self.compile_ptr(v);
+                self.path.pop();
+                id
+            })
             .collect()
     }
 
@@ -457,14 +512,22 @@ impl Compiler<'_> {
     ) -> Result<BTreeMap<String, NodeId>, String> {
         let mut out = BTreeMap::new();
         for (k, v) in go_object(raw, go_type)?.unwrap_or_default() {
+            self.path.push(escape_token(&k));
             let id = if by_value {
-                self.compile(&v)?
+                self.compile(&v)
             } else {
-                self.compile_ptr(&v)?
+                self.compile_ptr(&v)
             };
-            out.insert(k, id);
+            self.path.pop();
+            out.insert(k, id?);
         }
         Ok(out)
+    }
+
+    /// The id of the reference keyword being compiled (its place in the document).
+    fn site(&mut self) -> usize {
+        let next = self.sites.len();
+        *self.sites.entry(self.path.join("/")).or_insert(next)
     }
 
     /// Decodes a keyword as qri-io does; the error is without its `error unmarshaling` prefix.
@@ -472,13 +535,24 @@ impl Compiler<'_> {
         let ty = |t: &str| format!("jsonschema.{t}");
         Ok(Some(match name {
             "$ref" => {
-                let r = go_string(raw, "string")?.unwrap_or_default();
-                let target = self.resolve(&r);
-                Kw::Ref(r, target)
+                // qri-io keeps `url.QueryUnescape(ref)`, empty when an escape is invalid.
+                let reference =
+                    crate::gourl::query_unescape(&go_string(raw, "string")?.unwrap_or_default())
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
+                Kw::Ref {
+                    target: self.resolve(&reference, false),
+                    site: self.site(),
+                    reference,
+                }
             }
             "$recursiveRef" => {
-                go_string(raw, "string")?;
-                Kw::Ref("#".into(), self.resolve("#"))
+                let reference = go_string(raw, "string")?.unwrap_or_default();
+                Kw::RecursiveRef {
+                    target: self.resolve(&reference, true),
+                    site: self.site(),
+                    reference,
+                }
             }
             "type" => {
                 let vals = match go_kind(raw) {
@@ -581,14 +655,15 @@ impl Compiler<'_> {
             "then" => Kw::Then(self.compile(raw)?),
             "else" => Kw::Else(self.compile(raw)?),
             "format" => Kw::Format(go_string(raw, &ty("Format"))?.unwrap_or_default()),
-            // Reached through `$ref`; decoded for the errors only.
-            "$defs" => {
+            // Reached through `$ref`; decoded for the errors only. Go v1.1.2 registers the
+            // draft-07 `definitions` as `$defs` (qri-io ignored it).
+            "$defs" | "definitions" => {
                 self.schema_map(raw, &ty("Defs"), false)?;
                 return Ok(None);
             }
             "$recursiveAnchor" => {
                 self.compile(raw)?;
-                return Ok(None);
+                Kw::RecursiveAnchor
             }
             "$schema" | "$id" | "$anchor" | "$comment" | "title" | "description" => {
                 let t = match name {
@@ -621,36 +696,136 @@ impl Compiler<'_> {
                 go_any(raw)?;
                 return Ok(None);
             }
-            // Unsupported keywords (`definitions`, `dependencies`, ...) and unknown members
+            // Unsupported keywords (`dependencies`, `deprecated`, ...) and unknown members
             // are not decoded.
             _ => return Ok(None),
         }))
     }
 
-    /// Resolves a reference inside the document; `None` when it points elsewhere, or to a
-    /// subschema that does not compile (its error is reported by its own keyword, or not at
-    /// all where qri-io does not decode it, as under `definitions`).
-    fn resolve(&mut self, reference: &str) -> Option<NodeId> {
-        let fragment = reference.strip_prefix('#')?;
-        let pointer = if fragment.is_empty() || fragment.starts_with('/') {
-            fragment.to_string()
+    /// Resolves a reference inside the document as qri-io does (`recursive`: for
+    /// `$recursiveRef`); `None` when it points elsewhere (another document is not downloaded),
+    /// or to a subschema that does not compile (its error is reported by its own keyword, or
+    /// not at all where qri-io does not decode it).
+    ///
+    /// The part before `#` names the document (blank: this one, so `""` is the root); the
+    /// part after the first `#` is the fragment. `#name` finds a subschema with this
+    /// `$anchor` or `$id` (see MIGRATION.md); otherwise `$ref` reads `name` as a pointer
+    /// token and `$recursiveRef` takes the root.
+    fn resolve(&mut self, reference: &str, recursive: bool) -> Option<NodeId> {
+        let mut parts = reference.split('#');
+        if !parts.next().unwrap_or("").trim().is_empty() {
+            return None;
+        }
+        let fragment = parts.next().unwrap_or("");
+        let place = if fragment.is_empty() {
+            Vec::new()
+        } else if fragment.starts_with('/') {
+            self.locate(&canonical_pointer(fragment))?
         } else {
-            let root: Value = serde_json::from_str(self.root_text).unwrap_or(Value::Null);
-            find_anchor(&root, fragment, &mut Vec::new())?
+            let anchor = if is_local_schema_id(reference) {
+                let root: Value = serde_json::from_str(self.root_text).unwrap_or(Value::Null);
+                find_anchor(&root, fragment, &mut Vec::new())
+            } else {
+                None
+            };
+            match anchor {
+                Some(pointer) => canonical_pointer(&pointer),
+                None if recursive => Vec::new(),
+                None => self.locate(&canonical_pointer(&format!("/{fragment}")))?,
+            }
         };
+        self.resolve_place(place)
+    }
+
+    /// qri-io `Schema.Resolve`: the place in the document of the subschema a pointer leads
+    /// to, through the keywords that hold subschemas (`items` and the lists by index, the maps
+    /// by name; `#/items/0` is also a single `items` schema). A keyword that holds no
+    /// subschema leads nowhere. A member that is not a keyword is read as plain JSON, which
+    /// qri-io never resolved (see MIGRATION.md).
+    fn locate(&self, tokens: &[String]) -> Option<Vec<String>> {
+        let unescape = |t: &str| t.replace("~1", "/").replace("~0", "~");
+        // The last duplicate wins, as when decoding into a map.
+        fn member<'r>(raw: &'r RawValue, key: &str) -> Option<&'r RawValue> {
+            if go_kind(raw) != "object" {
+                return None;
+            }
+            serde_json::from_str::<HashMap<String, &RawValue>>(raw.get())
+                .ok()?
+                .get(key)
+                .copied()
+        }
+        let mut place = Vec::new();
+        let mut current: &RawValue = serde_json::from_str(self.root_text).ok()?;
+        let mut i = 0;
+        while i < tokens.len() {
+            let key = unescape(&tokens[i]);
+            let value = member(current, &key)?;
+            place.push(tokens[i].clone());
+            i += 1;
+            match key.as_str() {
+                "not"
+                | "if"
+                | "then"
+                | "else"
+                | "additionalProperties"
+                | "additionalItems"
+                | "propertyNames"
+                | "contains"
+                | "unevaluatedProperties"
+                | "unevaluatedItems"
+                | "$recursiveAnchor" => current = value,
+                "allOf" | "anyOf" | "oneOf" | "items" => {
+                    // strconv.Atoi
+                    let pos: i64 = unescape(tokens.get(i)?).parse().ok()?;
+                    let pos = usize::try_from(pos).ok()?;
+                    if go_kind(value) == "array" {
+                        let list: Vec<&RawValue> = serde_json::from_str(value.get()).ok()?;
+                        current = list.get(pos)?;
+                        place.push(pos.to_string());
+                    } else if key == "items" && pos == 0 {
+                        current = value;
+                    } else {
+                        return None;
+                    }
+                    i += 1;
+                }
+                "properties" | "patternProperties" | "$defs" | "definitions"
+                | "dependentSchemas" => {
+                    current = member(value, &unescape(tokens.get(i)?))?;
+                    place.push(tokens[i].clone());
+                    i += 1;
+                }
+                k if KEYWORDS.contains(&k) => return None,
+                _ => {
+                    place.extend_from_slice(&tokens[i..]);
+                    let pointer: String = place.iter().map(|t| format!("/{t}")).collect();
+                    eval_pointer(self.root_text, &pointer)?;
+                    return Some(place);
+                }
+            }
+        }
+        Some(place)
+    }
+
+    /// The subschema at a place in the document, compiled once.
+    fn resolve_place(&mut self, tokens: Vec<String>) -> Option<NodeId> {
+        if tokens.is_empty() {
+            // The root itself: its id is 0 once compiled.
+            return Some(0);
+        }
+        let pointer: String = tokens.iter().map(|t| format!("/{t}")).collect();
         if let Some(id) = self.by_pointer.get(&pointer) {
             return Some(*id);
         }
         let text = eval_pointer(self.root_text, &pointer)?;
-        if pointer.is_empty() {
-            // The root itself: its id is 0 once compiled.
-            return Some(0);
-        }
         let raw: &RawValue = serde_json::from_str(text).ok()?;
         // Reserve the id before compiling to support recursive references.
         let reserved = self.nodes.len();
         self.by_pointer.insert(pointer.clone(), reserved);
-        match self.compile(raw) {
+        let path = std::mem::replace(&mut self.path, tokens);
+        let compiled = self.compile(raw);
+        self.path = path;
+        match compiled {
             Ok(id) => {
                 if id != reserved {
                     self.by_pointer.insert(pointer, id);
@@ -675,17 +850,32 @@ impl Schema {
             root_text: raw.get(),
             nodes: Vec::new(),
             by_pointer: HashMap::new(),
+            path: Vec::new(),
+            sites: HashMap::new(),
         };
         let root = c.compile(raw)?;
+        // qri-io registers the root under its `$id` (the `docPath` of the validation) unless
+        // it is empty or a `#name`.
+        let id = members(raw)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| match_field(k, &["$id"]).is_some())
+            .filter_map(|(_, v)| go_string(&v, "string").ok().flatten())
+            .next_back()
+            .unwrap_or_default();
         Ok(Schema {
             nodes: c.nodes,
             root,
+            base_uri: !id.is_empty() && !id.starts_with('#'),
         })
     }
 
     /// Validates a decoded document (`Schema.Validate`). The errors are sorted by path (byte
     /// order, stable), as Go sorts them.
     pub fn validate(&self, data: &Value) -> Vec<KeyError> {
+        GUARD.with(|g| *g.borrow_mut() = Guard::default());
         let st = St::new();
         self.validate_node(Some(self.root), &st, data);
         let mut errs = st.errs.take();
@@ -696,12 +886,6 @@ impl Schema {
     fn validate_node(&self, id: Option<NodeId>, st: &St, data: &Value) {
         let Some(id) = id else {
             st.add_error(data, "schema is nil".to_string());
-            return;
-        };
-        // A `$ref` that comes back to a schema being evaluated on the same value, without
-        // going into it (`{"$ref": "#"}`), loops forever: qri-io recursed until the stack
-        // overflowed. The loop adds no constraint, so it is skipped.
-        let Some(_active) = Active::enter(id, data) else {
             return;
         };
         match &self.nodes[id] {
@@ -722,7 +906,34 @@ impl Schema {
 
     fn keyword(&self, kw: &Kw, has_then_else: bool, st: &St, data: &Value) {
         match kw {
-            Kw::Ref(reference, target) => {
+            Kw::Ref {
+                reference,
+                target,
+                site,
+            } => {
+                // Go v1.1.2 `loopSafeRef`: a reference is not followed again while it is
+                // followed on the same value (qri-io recursed until the stack overflowed).
+                // When it comes back, the reference followed last led to a schema already
+                // being evaluated on the value: it adds no constraint, so what was evaluated
+                // through it is undone.
+                let came_back = GUARD.with(|g| {
+                    let mut g = g.borrow_mut();
+                    if g.refs
+                        .iter()
+                        .any(|(s, l, _)| s == site && *l == st.instance)
+                    {
+                        if let Some(last) = g.refs.last_mut() {
+                            last.2 = true;
+                        }
+                        return true;
+                    }
+                    g.refs.push((*site, st.instance.clone(), false));
+                    false
+                });
+                if came_back {
+                    return;
+                }
+                let saved = st.save();
                 if target.is_none() {
                     st.add_error(
                         data,
@@ -733,7 +944,61 @@ impl Schema {
                 sub.clear();
                 self.validate_node(*target, &sub, data);
                 st.update_from(&sub);
+                if GUARD.with(|g| g.borrow_mut().refs.pop().is_some_and(|(_, _, l)| l)) {
+                    st.restore(saved);
+                }
             }
+            Kw::RecursiveRef {
+                reference,
+                target,
+                site,
+            } => {
+                // qri-io: not followed again on a location where it is followed (nothing is
+                // undone).
+                let (followed, resolved) = GUARD.with(|g| {
+                    let g = g.borrow();
+                    (
+                        g.recursive_refs
+                            .iter()
+                            .any(|(s, l)| s == site && *l == st.instance),
+                        g.resolved.contains(site),
+                    )
+                });
+                if followed {
+                    return;
+                }
+                let mut target = *target;
+                if !resolved {
+                    // Below a `$recursiveAnchor`, qri-io resolves the reference from the base
+                    // URI of the document: without one (no root `$id`) it fails, and is tried
+                    // again the next time.
+                    if st.recursive_anchor.get() && !self.base_uri {
+                        st.add_error(&Value::Null, "base uri not set".to_string());
+                        target = None;
+                    }
+                    match target {
+                        Some(_) => GUARD.with(|g| g.borrow_mut().resolved.insert(*site)),
+                        None => {
+                            st.add_error(
+                                data,
+                                format!("failed to resolve schema for ref {reference}"),
+                            );
+                            false
+                        }
+                    };
+                }
+                let mut sub = st.sub();
+                sub.clear();
+                GUARD.with(|g| {
+                    g.borrow_mut()
+                        .recursive_refs
+                        .push((*site, st.instance.clone()))
+                });
+                self.validate_node(target, &sub, data);
+                GUARD.with(|g| g.borrow_mut().recursive_refs.pop());
+                st.update_from(&sub);
+            }
+            Kw::RecursiveAnchor => st.recursive_anchor.set(true),
             Kw::Type(vals) => {
                 let jt = data_type(data);
                 for t in vals {
@@ -1206,36 +1471,31 @@ impl Schema {
     }
 }
 
+/// The references followed by one validation.
+#[derive(Default)]
+struct Guard {
+    /// `$ref` keywords being followed, with the instance location, and whether a reference
+    /// came back to them (Go v1.1.2 `loopSafeRef`).
+    refs: Vec<(usize, Vec<String>, bool)>,
+    /// `$recursiveRef` keywords being followed, with the instance location (qri-io
+    /// `validatingLocations`).
+    recursive_refs: Vec<(usize, Vec<String>)>,
+    /// `$recursiveRef` keywords resolved so far (qri-io keeps a resolved reference).
+    resolved: HashSet<usize>,
+}
+
 thread_local! {
-    /// The schemas being evaluated, with the address of their value (validation is
-    /// synchronous: it runs on one thread from start to end).
-    static ACTIVE: RefCell<Vec<(NodeId, usize)>> = const { RefCell::new(Vec::new()) };
+    /// Validation is synchronous: it runs on one thread from start to end.
+    static GUARD: RefCell<Guard> = RefCell::new(Guard::default());
 }
 
-/// A schema under evaluation on a value; leaves the list when dropped.
-struct Active;
-
-impl Active {
-    /// `None` when the schema is already being evaluated on this very value.
-    fn enter(id: NodeId, data: &Value) -> Option<Active> {
-        let key = (id, data as *const Value as usize);
-        ACTIVE.with(|a| {
-            let mut a = a.borrow_mut();
-            if a.contains(&key) {
-                return None;
-            }
-            a.push(key);
-            Some(Active)
-        })
-    }
-}
-
-impl Drop for Active {
-    fn drop(&mut self) {
-        ACTIVE.with(|a| {
-            a.borrow_mut().pop();
-        });
-    }
+/// What following a reference changes in a state (Go v1.1.2 `savedState`).
+struct Saved {
+    errors: usize,
+    evaluated: HashSet<String>,
+    local_evaluated: HashSet<String>,
+    last_index: i64,
+    local_last_index: i64,
 }
 
 /// Validation state (`ValidationState`): sets shared with sub-states until cleared, as in
@@ -1250,6 +1510,8 @@ struct St {
     if_result: Rc<std::cell::Cell<Option<bool>>>,
     contains_count: Rc<std::cell::Cell<Option<usize>>>,
     errs: Rc<RefCell<Vec<KeyError>>>,
+    /// A `$recursiveAnchor` was evaluated (qri-io `RecursiveAnchor`, copied to sub-states).
+    recursive_anchor: std::cell::Cell<bool>,
 }
 
 impl St {
@@ -1263,6 +1525,7 @@ impl St {
             if_result: Rc::default(),
             contains_count: Rc::default(),
             errs: Rc::default(),
+            recursive_anchor: std::cell::Cell::new(false),
         }
     }
 
@@ -1277,7 +1540,28 @@ impl St {
             if_result: Rc::default(),
             contains_count: Rc::default(),
             errs: self.errs.clone(),
+            recursive_anchor: std::cell::Cell::new(self.recursive_anchor.get()),
         }
+    }
+
+    fn save(&self) -> Saved {
+        Saved {
+            errors: self.errs.borrow().len(),
+            evaluated: self.evaluated.borrow().clone(),
+            local_evaluated: self.local_evaluated.borrow().clone(),
+            last_index: self.last_index.get(),
+            local_last_index: self.local_last_index.get(),
+        }
+    }
+
+    /// Restores a saved state; the sets may be shared with other states: they are restored
+    /// in place.
+    fn restore(&self, saved: Saved) {
+        self.errs.borrow_mut().truncate(saved.errors);
+        *self.evaluated.borrow_mut() = saved.evaluated;
+        *self.local_evaluated.borrow_mut() = saved.local_evaluated;
+        self.last_index.set(saved.last_index);
+        self.local_last_index.set(saved.local_last_index);
     }
 
     /// `ClearState`.
@@ -2211,6 +2495,127 @@ mod tests {
     fn schema_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Schema>();
+    }
+
+    fn errors(schema: &str, data: Value) -> Vec<(String, String, String)> {
+        let mut errors = msgs(&Schema::compile(schema.as_bytes()).unwrap().validate(&data));
+        errors.sort();
+        errors
+    }
+
+    fn err(path: &str, message: &str, value: &str) -> (String, String, String) {
+        (path.into(), message.into(), value.into())
+    }
+
+    /// References resolve as in qri-io (the expected errors are Go v1.1.2's): the reference is
+    /// URL-unescaped once (an invalid escape makes it `""`, the root); `""` is the root;
+    /// `#/items/0` is also a single `items` schema, while a keyword that holds no subschema
+    /// (`#/items` without index, `#/properties`, `#/required`) resolves nowhere.
+    #[test]
+    fn references_resolve_like_qri_io() {
+        assert_eq!(
+            errors(
+                r#"{"type": "object", "properties": {"child": {"$ref": ""}}, "required": ["n"]}"#,
+                json!({"n": 1, "child": {}})
+            ),
+            [err("/child", "\"n\" value is required", "map[]")]
+        );
+        let escaped = r##"{"$defs": {"a b": {"type": "string"}}, "properties": {
+            "p": {"$ref": "#/$defs/a%20b"}, "q": {"$ref": "#/$defs/a+b"},
+            "r": {"$ref": "#/$defs/%zz"}, "s": {"$ref": "#/$defs/a%2520b"}}}"##;
+        assert_eq!(
+            errors(escaped, json!({"p": 1, "q": 1, "r": 1, "s": 1})),
+            [
+                err("/p", "type should be string, got integer", "1"),
+                err("/q", "type should be string, got integer", "1"),
+                err("/s", "failed to resolve schema for ref #/$defs/a%20b", "1"),
+                err("/s", "schema is nil", "1"),
+            ]
+        );
+        let keywords = r##"{"items": {"type": "string"}, "required": [], "properties": {
+            "a": {"$ref": "#/items/0"}, "b": {"$ref": "#/items"},
+            "c": {"$ref": "#/properties"}, "d": {"$ref": "#/required"}}}"##;
+        let mut expected = vec![err("/a", "type should be string, got integer", "1")];
+        for (path, reference) in [("/b", "items"), ("/c", "properties"), ("/d", "required")] {
+            expected.push(err(
+                path,
+                &format!("failed to resolve schema for ref #/{reference}"),
+                "1",
+            ));
+            expected.push(err(path, "schema is nil", "1"));
+        }
+        assert_eq!(
+            errors(keywords, json!({"a": 1, "b": 1, "c": 1, "d": 1})),
+            expected
+        );
+    }
+
+    /// `$recursiveRef` follows its own reference (a fragment that is not a pointer is the
+    /// root). Below a `$recursiveAnchor`, without root `$id`, qri-io fails to resolve it.
+    #[test]
+    fn recursive_refs_like_qri_io() {
+        let targets = r##"{"$defs": {"a": {"type": "integer"}}, "type": "object", "properties": {
+            "x": {"$recursiveRef": "#/$defs/a"}, "y": {"$recursiveRef": "#nope"}}}"##;
+        assert_eq!(
+            errors(targets, json!({"x": "s", "y": 5})),
+            [
+                err("/x", "type should be integer, got string", "s"),
+                err("/y", "type should be object, got integer", "5"),
+            ]
+        );
+        let anchored = r##"{"$recursiveAnchor": true, "type": "object",
+            "properties": {"c": {"$recursiveRef": "#"}}}"##;
+        assert_eq!(
+            errors(anchored, json!({"c": 1})),
+            [
+                err("/c", "base uri not set", "<nil>"),
+                err("/c", "failed to resolve schema for ref #", "1"),
+                err("/c", "schema is nil", "1"),
+            ]
+        );
+        assert_eq!(errors(anchored, json!({})), []);
+        let with_id = anchored.replacen('{', r#"{"$id": "http://example.com/s.json","#, 1);
+        assert_eq!(
+            errors(&with_id, json!({"c": 1})),
+            [err("/c", "type should be object, got integer", "1")]
+        );
+        assert_eq!(errors(&with_id, json!({"c": {}})), []);
+    }
+
+    /// A reference that loops on the same value (Go v1.1.2 `loopSafeRef`): the `$ref` followed
+    /// last adds no constraint, what was evaluated through it is undone. A `$recursiveRef` is
+    /// not followed again on the same location, without undoing anything (qri-io).
+    #[test]
+    fn looping_references_like_go() {
+        let undone = r##"{"$ref": "#/$defs/b", "$defs": {"b":
+            {"$recursiveRef": "#", "$ref": "#/not", "type": "boolean"}}}"##;
+        assert_eq!(errors(undone, json!(null)), []);
+        assert_eq!(
+            errors(r##"{"$recursiveRef": "#", "type": "string"}"##, json!(1)),
+            [
+                err("/", "type should be string, got integer", "1"),
+                err("/", "type should be string, got integer", "1"),
+            ]
+        );
+        for schema in [
+            r##"{"allOf": [{"$ref": "#"}], "type": "string"}"##,
+            r##"{"$ref": "#/$defs/a", "$defs": {"a": {"allOf": [{"type": "string"}, {"$ref": "#/$defs/a"}]}}}"##,
+        ] {
+            assert_eq!(
+                errors(schema, json!(1)),
+                [err("/", "type should be string, got integer", "1")],
+                "{schema}"
+            );
+        }
+    }
+
+    /// Go v1.1.2 decodes the draft-07 `definitions` as `$defs` (qri-io ignored it).
+    #[test]
+    fn definitions_are_decoded() {
+        assert_eq!(
+            Schema::compile(br#"{"definitions": {"a": {"type": 5}}}"#).unwrap_err(),
+            "error unmarshaling definitions from json: error unmarshaling type from json: json: cannot unmarshal number into Go value of type []string"
+        );
     }
 
     /// A `$ref` coming back to its own schema on the same value overflowed the stack (Go
