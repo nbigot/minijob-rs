@@ -165,13 +165,25 @@ impl App {
         let start = Instant::now();
         let mut resp = match self.router.route(&mut req) {
             Ok(handler) => {
+                let request = format!("{method} {}", req.path);
                 let fut = handler(self.clone(), req);
                 match AssertUnwindSafe(fut).catch_unwind().await {
                     Ok(r) => r,
-                    Err(_) => {
+                    Err(payload) => {
+                        // Go's recoverPanics (v1.1.2), without the goroutine stack.
+                        let panic = payload
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_default();
                         self.logger.error(
-                            "Panic while handling a request",
-                            &[log::s("topic", "server")],
+                            "Panic while answering a request",
+                            &[
+                                log::s("topic", "server"),
+                                log::s("method", "recoverPanics"),
+                                log::s("request", &request),
+                                log::s("panic", &panic),
+                            ],
                         );
                         text(500, "Internal Server Error")
                     }
@@ -598,4 +610,65 @@ pub async fn run(cfg: Arc<Config>, version: &str, logger: Logger) -> Result<Outc
     }
     svc.stop().await;
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn panics(_app: Arc<App>, _req: Req) -> Resp {
+        panic!("boom")
+    }
+
+    /// A handler that panics is logged and answered 500, as by Go's `recoverPanics`; the
+    /// server keeps answering.
+    #[tokio::test]
+    async fn panic_answers_500() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.log");
+        let yaml = format!(
+            "backend:\n  type: mock\n  logger: {{level: error, encoding: json}}\nlogger:\n  level: info\n  encoding: json\n  outputPaths: ['{}']\n  encoderConfig: {{messageKey: msg}}\n",
+            path.display()
+        );
+        let cfg = Arc::new(crate::config::parse(&yaml).unwrap());
+        let logger = Logger::build(&cfg.logger).unwrap();
+        let svc = Service::create(cfg.clone(), "test", Logger::nop())
+            .await
+            .unwrap();
+        let mut router = Router::default();
+        router.get("/boom", h!(panics));
+        router.get("/ping", h!(handlers::ping));
+        let (control, _rx) = mpsc::unbounded_channel();
+        let app = Arc::new(App {
+            prom: None,
+            svc,
+            cfg,
+            schema: None,
+            logger,
+            router,
+            cors: None,
+            control,
+            connections: AtomicI64::new(0),
+            monitor: monitor::Monitor::default(),
+        });
+        let req = |path: &str| Req {
+            method: Method::GET,
+            path: path.into(),
+            query: Vec::new(),
+            headers: ::http::HeaderMap::new(),
+            body: bytes::Bytes::new(),
+            params: Vec::new(),
+            remote: "127.0.0.1:1".parse().unwrap(),
+        };
+        let resp = app.clone().dispatch(req("/boom")).await;
+        assert_eq!(resp.status(), 500);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"Internal Server Error");
+        assert_eq!(app.clone().dispatch(req("/ping")).await.status(), 200);
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.contains(r#""msg":"Panic while answering a request","topic":"server","method":"recoverPanics","request":"GET /boom","panic":"boom"}"#),
+            "{log}"
+        );
+    }
 }
