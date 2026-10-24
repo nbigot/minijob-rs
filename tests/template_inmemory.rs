@@ -769,6 +769,42 @@ fn system_monitor_and_docs() {
     );
 }
 
+/// After 10 s, an incomplete body gets `408` as in Go; incomplete headers close the
+/// connection without an answer (Go: `408`).
+#[test]
+fn slow_clients_time_out() {
+    use std::io::{Read, Write};
+    let s = start();
+    let send = |data: &'static str| {
+        let port = s.port;
+        std::thread::spawn(move || {
+            let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            tcp.write_all(data.as_bytes()).unwrap();
+            let start = Instant::now();
+            let mut answer = String::new();
+            let _ = tcp.read_to_string(&mut answer);
+            (start.elapsed(), answer)
+        })
+    };
+    let body = send(
+        "POST /api/v1/job/ HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+         Content-Length: 100\r\n\r\n{\"topic\"",
+    );
+    let headers = send("POST /api/v1/job/ HTTP/1.1\r\nHost: x\r\n");
+    let (elapsed, answer) = body.join().unwrap();
+    assert!(elapsed >= Duration::from_secs(9), "{elapsed:?}");
+    assert!(
+        answer.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+        "{answer}"
+    );
+    assert!(answer.contains("\r\nConnection: close\r\n"), "{answer}");
+    assert!(answer.ends_with("\r\n\r\nRequest Timeout"), "{answer}");
+    let (elapsed, answer) = headers.join().unwrap();
+    assert!(elapsed >= Duration::from_secs(9), "{elapsed:?}");
+    assert_eq!(answer, "");
+}
+
 /// `webserver.logs.enable`: Fiber's access log on stdout,
 /// `[time] status - ip:port - latency method path`.
 #[test]

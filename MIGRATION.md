@@ -57,7 +57,9 @@ these bugs too; where its behavior changed, this version follows it (see
   described the other errors in a text body.
 - An HTTP/1.0 request is answered with an HTTP/1.0 status line (Go: HTTP/1.1 and
   `Connection: close`).
-- A client that does not send its headers within 10 s is disconnected (same timeout as Go).
+- A client that does not send its headers within 10 s is disconnected (same timeout as Go),
+  without an answer; Go answered `408 Request Timeout` when part of the headers had arrived.
+  A body not received within 10 s gets `408 Request Timeout`, as in Go.
 - Bodies above 10 MiB get `413 Request Entity Too Large`, as in Go.
 - Request bodies compressed with `gzip`, `deflate` or `br` (`Content-Encoding`) are decoded, as in Go.
   A body larger than 10 MiB once decoded gets `413 Request Entity Too Large`; Go decoded it
