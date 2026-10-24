@@ -132,10 +132,17 @@ these bugs too; where its behavior changed, this version follows it (see
 - When several errors are found, their order is stable (sorted by property name). Go's order
   could change between requests.
 - `$ref` is resolved inside the schema file, including draft-07 `#/definitions/...`, which
-  never resolved in Go. Remote references are not downloaded (Go downloaded them while
-  answering a request); they fail with the same message as an unreachable one in Go.
-  `#name` references find a subschema with `"$anchor": "name"` or `"$id": "#name"` (Go
-  ignored `$anchor`, and found such an `$id` only once validation had gone through it).
+  never resolved in Go v1.0.0 (Go v1.1 resolves them, and refuses an invalid `definitions`
+  at startup, as this version does). Remote references are not downloaded (Go downloaded
+  them while answering a request); they fail with the same message as an unreachable one in
+  Go. `#name` references find a subschema with `"$anchor": "name"` or `"$id": "#name"` (Go
+  ignored `$anchor`, and found such an `$id` only once validation had gone through it). A
+  pointer may go through members that are not keywords (`#/components/a`); Go resolves
+  pointers only through the keywords that hold subschemas, and a pointer to a missing
+  `patternProperties` entry makes its validator panic (`500` in Go v1.1).
+- Go resolves a reference once and keeps it for the next requests; a `$recursiveRef` below a
+  `$recursiveAnchor` (without root `$id`, it fails with `base uri not set`) is resolved
+  again on each request here, as on the first request in Go.
 - `pattern`, `patternProperties` and `format: regex` use Go's regular expression syntax and
   matching (`\d`, `\w`, `\s`, `\b` are ASCII-only). Script names with an underscore
   (`\p{Old_Italic}`) are accepted; Go 1.25 refuses them.
@@ -144,9 +151,11 @@ these bugs too; where its behavior changed, this version follows it (see
   subschema as JSON; Go printed an internal structure with memory addresses.
 - The schema is compiled at startup and shared safely between requests (Go modified it on
   first use from concurrent requests).
-- A schema that makes Go's validator crash the server is handled: an empty `enum` or `type`
-  list gives its usual error, a `null` subschema `schema is nil`, and a `$ref` that loops back
-  to its own schema without going into the document (`{"$ref": "#"}`) adds no constraint (Go
+- A schema that made Go v1.0.0's validator crash the server is accepted: an empty `enum` or
+  `type` list gives its usual error, a `null` subschema `schema is nil`. Go v1.1 refuses such
+  schemas at startup (`schema not supported by the validator`).
+- A `$ref` that comes back to a schema on the same value (`{"$ref": "#"}`) adds no constraint,
+  as in Go v1.1: what was evaluated through the reference followed last is undone (Go v1.0.0
   recursed until the stack overflowed).
 - A schema file Go refuses is refused with the same message, except a JSON syntax error,
   worded differently (`EOF while parsing an object at line 1 column 16`; Go: `unexpected

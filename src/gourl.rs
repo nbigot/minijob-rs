@@ -13,6 +13,7 @@ enum Mode {
     Zone,
     UserPassword,
     Fragment,
+    QueryComponent,
 }
 
 fn is_alnum(c: u8) -> bool {
@@ -53,7 +54,7 @@ fn should_escape(c: u8, mode: Mode) -> bool {
             Mode::Path => return c == b'?',
             Mode::UserPassword => return matches!(c, b'@' | b'/' | b'?' | b':'),
             Mode::Fragment => return false,
-            Mode::Host | Mode::Zone => {}
+            Mode::Host | Mode::Zone | Mode::QueryComponent => {}
         },
         _ => {}
     }
@@ -114,11 +115,20 @@ fn unescape(s: &[u8], mode: Mode) -> Result<Vec<u8>, String> {
             out.push((unhex(s[i + 1]) << 4) | unhex(s[i + 2]));
             i += 3;
         } else {
-            out.push(s[i]);
+            out.push(if mode == Mode::QueryComponent && s[i] == b'+' {
+                b' '
+            } else {
+                s[i]
+            });
             i += 1;
         }
     }
     Ok(out)
+}
+
+/// `url.QueryUnescape`: decodes the `%XX` escapes and `+` (a space).
+pub fn query_unescape(s: &str) -> Result<Vec<u8>, String> {
+    unescape(s.as_bytes(), Mode::QueryComponent)
 }
 
 /// `getScheme`: the scheme (possibly empty) and the rest.
