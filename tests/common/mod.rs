@@ -13,12 +13,22 @@ pub fn template_path(name: &str) -> PathBuf {
     Path::new(MANIFEST).join("config-templates").join(name)
 }
 
+/// A port no other server of this test binary got. Once the probe socket is closed the OS
+/// may hand the port out again, also while a server is stopped for a restart: a second
+/// server on it would fail to bind, and its harness would talk to (and stop) the first.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static TAKEN: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    loop {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if TAKEN.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
 }
 
 fn slash(p: &Path) -> String {
@@ -183,7 +193,9 @@ impl Server {
     }
 
     pub fn send(&self, req: reqwest::blocking::RequestBuilder) -> Resp {
-        let r = req.send().unwrap();
+        let r = req
+            .send()
+            .unwrap_or_else(|e| panic!("{e:?}\nserver log:\n{}", self.log()));
         let status = r.status().as_u16();
         let headers = r.headers().clone();
         let body = r.bytes().unwrap().to_vec();
