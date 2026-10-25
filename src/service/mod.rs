@@ -1854,7 +1854,7 @@ webserver:
                 }
                 90..=91 => {
                     let _ = svc
-                        .unlock_resource(rng.pick(&["r1", "r2", "r3", "x"]))
+                        .unlock_resource(*rng.pick(&["r1", "r2", "r3", "x"]))
                         .await;
                     unlocked = true;
                     "unlock"
